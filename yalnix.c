@@ -24,19 +24,18 @@ void trap_math_handler(ExceptionStackFrame *frame){}
 void trap_tty_receive_handler(ExceptionStackFrame *frame){}
 void trap_tty_transmit_handler(ExceptionStackFrame *frame){}
 
-void *p_k_brk = 0;
-void *p_k_base = 0;
-void *p_k_limit = 0;
+void *k_brk = 0;
+void *p_limit = 0;
 char v_enabled = 0;
 int free_pf_head = -1;
 int free_pf_tail = -1;
 int free_pfn = 0;
+struct pte *region0, *region1;
 
 extern void KernelStart(ExceptionStackFrame * frame, 
 	unsigned int pmem_size, void *orig_brk, char **cmd_args) {
-	p_k_brk = orig_brk;
-	p_k_base = orig_brk;
-	p_k_limit = (void *)((long)(PMEM_BASE + pmem_size));
+	k_brk = orig_brk;
+	p_limit = (void *)((long)(PMEM_BASE + pmem_size));
 	//initialize interrupt vector table
 	trap_handler *interrupt_vector_table = calloc(TRAP_VECTOR_SIZE, sizeof(trap_handler));
 	if (interrupt_vector_table == NULL) return;
@@ -49,19 +48,26 @@ extern void KernelStart(ExceptionStackFrame * frame,
 	interrupt_vector_table[TRAP_TTY_TRANSMIT] = trap_tty_transmit_handler;
 	WriteRegister(REG_VECTOR_BASE, (RCS421RegVal)interrupt_vector_table);
 
-	//initialize page tables
-	void *region0 = calloc(PAGE_TABLE_LEN, sizeof(struct pte));
+	//initialize page table
+	region0 = calloc(PAGE_TABLE_LEN, sizeof(struct pte));
 	if (region0 == NULL) return;
-	WriteRegister(REG_PTR0, (RCS421RegVal)region0);
-	void *region1 = calloc(PAGE_TABLE_LEN, sizeof(struct pte));
+	region1 = calloc(PAGE_TABLE_LEN, sizeof(struct pte));
 	if (region1 == NULL) return;
+	int k_base_pfn = VMEM_1_BASE >> PAGESHIFT;
+	int i;
+	for (i = k_base_pfn; i < UP_TO_PAGE(k_brk) >> PAGESHIFT; i++) {
+		region1[i - k_base_pfn].pfn = i;
+		region1[i - k_base_pfn].uprot = 0;
+		region1[i - k_base_pfn].kprot = (i<(UP_TO_PAGE(&_etext) >> PAGESHIFT)?5:6);
+		region1[i - k_base_pfn].valid = 1;
+	}
+	WriteRegister(REG_PTR0, (RCS421RegVal)region0);
 	WriteRegister(REG_PTR1, (RCS421RegVal)region1);
 
 	//initialize free physical page list
 	//TODO: check if free space doesn't make up for even one single page
-	free_pf_head = UP_TO_PAGE(p_k_brk) >> PAGESHIFT;
-	int i;
-	for (i = free_pf_head; i < (DOWN_TO_PAGE(p_k_limit) >> PAGESHIFT) - 1; i++) {
+	free_pf_head = UP_TO_PAGE(k_brk) >> PAGESHIFT;
+	for (i = free_pf_head; i < (DOWN_TO_PAGE(p_limit) >> PAGESHIFT) - 1; i++) {
 		*(long *)((long)i * PAGESIZE) = i + 1;
 		free_pfn++;
 	}
@@ -84,8 +90,8 @@ extern void KernelStart(ExceptionStackFrame * frame,
 
 extern int SetKernelBrk(void *addr) {
 	if (!v_enabled) {
-		if (addr >= p_k_base && addr <= p_k_limit) {
-			p_k_brk = addr;
+		if ((long)addr >= VMEM_1_BASE && (long)addr <= VMEM_1_LIMIT) {
+			k_brk = addr;
 			return 0;
 		}
 		else {
@@ -94,4 +100,13 @@ extern int SetKernelBrk(void *addr) {
 		}
 	}
 	return 0;
+}
+
+static void WriteToPhysPFN(int pfn, int value) {
+	int tmp = UP_TO_PAGE(k_brk) >> PAGESHIFT;
+	region1[tmp].valid = 1;
+	region1[tmp].pfn = value;
+	region1[tmp].kprot = 6;
+	*(int *)(long)(tmp << PAGESHIFT) = value;
+	region1[tmp].valid = 0;
 }
