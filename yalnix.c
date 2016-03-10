@@ -9,17 +9,27 @@
 #include <comp421/yalnix.h>
 #include <comp421/hardware.h>
 
+typedef struct child_exit_info {
+	int pid;
+	int status;
+	struct child_exit_info *next;
+} cei;
+
 typedef struct pcb {
 	SavedContext *ctx;
 	int two_times_pfn_of_pt0; //since the page table may be located from the middle of a page 
 	int pid;
-	int uid;
-	char state; //RUNNING is 0, READY is 1
-	int duration;
+	char state; //RUNNING is 0, READY is 1, WAITBLOCK is 2
+	int time_to_switch;
 	struct pcb *next;
+	struct pcb *parent;
+	cei *exited_children_head;
+	cei *exited_children_tail;
 } pcb;
 
 typedef void (*trap_handler)(ExceptionStackFrame *frame);
+
+int LoadProgram(char *name, char **args, ExceptionStackFrame* frame); //may be removed if move this to a distinct file
 
 void trap_kernel_handler(ExceptionStackFrame *frame){}
 void trap_clock_handler(ExceptionStackFrame *frame){}
@@ -33,10 +43,20 @@ void *k_brk = 0;
 void *p_limit = 0;
 char v_enabled = 0;
 int free_pf_head = -1;
-int free_pf_tail = -1;
 int free_pfn = 0;
 struct pte *region0, *region1;
 long time = 0;
+
+pcb *running;
+pcb *ready_head, *ready_tail;
+pcb *delay_head, *delay_tail;
+pcb *tty_head[NUM_TERMINALS], *tty_tail[NUM_TERMINALS];
+
+void idle() {
+	while (1) {
+		Pause();
+	}
+}
 
 extern void KernelStart(ExceptionStackFrame * frame, 
 	unsigned int pmem_size, void *orig_brk, char **cmd_args) {
@@ -54,13 +74,33 @@ extern void KernelStart(ExceptionStackFrame * frame,
 	interrupt_vector_table[TRAP_TTY_TRANSMIT] = trap_tty_transmit_handler;
 	WriteRegister(REG_VECTOR_BASE, (RCS421RegVal)interrupt_vector_table);
 
-	//initialize page table
-	region0 = calloc(PAGE_TABLE_LEN, sizeof(struct pte));
-	if (region0 == NULL) return;
-	region1 = calloc(PAGE_TABLE_LEN, sizeof(struct pte));
-	if (region1 == NULL) return;
-	int k_base_pfn = VMEM_1_BASE >> PAGESHIFT;
 	int i;
+	//initialize free physical page list
+	//TODO: check if free space doesn't make up for even one single page
+	for (i = UP_TO_PAGE(k_brk) >> PAGESHIFT; i < DOWN_TO_PAGE(p_limit) >> PAGESHIFT; i++) {
+		*(int *)((long)i << PAGESHIFT) = free_pf_head;
+		free_pf_head = i;
+		free_pfn++;
+	}
+
+	//leave the last page for the two initial page tables
+	for (i = MEM_INVALID_PAGES; i < (DOWN_TO_PAGE(KERNEL_STACK_BASE) >> PAGESHIFT) - 1; i++) {
+		*(int *)((long)i << PAGESHIFT) = free_pf_head;
+		free_pf_head = i;
+		free_pfn++;
+	}
+
+	//initialize page table
+	region0 = (void *)((long)i << PAGESHIFT);
+	region1 = region0 + (PAGESIZE >> 1);
+	int k_base_pfn = VMEM_1_BASE >> PAGESHIFT;
+	for (i = 0; i < KERNEL_STACK_PAGES; i++) {
+		int index = (VMEM_REGION_SIZE >> PAGESHIFT) - i - 1;
+		region0[index].pfn = index;
+		region0[index].uprot = 0;
+		region0[index].kprot = PROT_READ | PROT_WRITE;
+		region0[index].valid = 1;
+	}
 	for (i = k_base_pfn; i < UP_TO_PAGE(k_brk) >> PAGESHIFT; i++) {
 		region1[i - k_base_pfn].pfn = i;
 		region1[i - k_base_pfn].uprot = 0;
@@ -70,29 +110,35 @@ extern void KernelStart(ExceptionStackFrame * frame,
 	WriteRegister(REG_PTR0, (RCS421RegVal)region0);
 	WriteRegister(REG_PTR1, (RCS421RegVal)region1);
 
-	//initialize free physical page list
-	//TODO: check if free space doesn't make up for even one single page
-	free_pf_head = UP_TO_PAGE(k_brk) >> PAGESHIFT;
-	for (i = free_pf_head; i < (DOWN_TO_PAGE(p_limit) >> PAGESHIFT) - 1; i++) {
-		*(int *)((long)i << PAGESHIFT) = i + 1;
-		free_pfn++;
-	}
-	*(int *)((long)i << PAGESHIFT) = MEM_INVALID_PAGES + 1;
-	free_pfn++;
-	for (i = MEM_INVALID_PAGES + 1; i < (DOWN_TO_PAGE(KERNEL_STACK_BASE) >> PAGESHIFT) - 1; i++) {
-		*(int *)((long)i << PAGESHIFT) = i + 1;
-		free_pfn++;
-	}
-	*(int *)((long)i << PAGESHIFT) = -1;
-	free_pf_tail = i;
-	free_pfn++;
-
 	//enable VM
 	WriteRegister(REG_VM_ENABLE, 1);
-
+	WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_ALL);
+	v_enabled = 1;
 	//TODO: idle
 
-
+	int init_res = LoadProgram(cmd_args[0], cmd_args, frame);
+	if (init_res < 0) {
+		fprintf(stderr, "Load init failed: %d\n", init_res);
+		return;
+	}
+	running = malloc(sizeof(pcb));
+	if (running == NULL) {
+		fprintf(stderr, "Malloc failed\n");
+		return;
+	}
+	running->ctx = malloc(sizeof(SavedContext));
+	if (running->ctx == NULL) {
+		fprintf(stderr, "Malloc failed\n");
+		return;
+	}
+	running->two_times_pfn_of_pt0 = (long)region0 >> (PAGESHIFT - 1);
+	running->pid = 1;
+	running->state = 0;
+	running->time_to_switch = time + 2;
+	running->next = NULL;
+	running->parent = NULL;
+	running->exited_children_head = NULL;
+	running->exited_children_tail = NULL;
 }
 
 extern int SetKernelBrk(void *addr) {
@@ -102,33 +148,47 @@ extern int SetKernelBrk(void *addr) {
 			return 0;
 		}
 		else {
-			perror("Brk out of bound.");
+			perror("Brk out of bound.\n");
 			return -1;
 		}
 	}
-	return 0;
+	else {
+
+	}
 }
 
 static void WriteToPhysPFN(int pfn, int value) {
 
-	int tmp = UP_TO_PAGE(k_brk) >> PAGESHIFT;
+	int tmp = (UP_TO_PAGE(k_brk) - VMEM_1_BASE) >> PAGESHIFT;
 	region1[tmp].valid = 1;
 	region1[tmp].pfn = value;
 	region1[tmp].kprot = PROT_READ | PROT_WRITE;
-	*(int *)(long)(tmp << PAGESHIFT) = value;
+	*(int *)(long)((tmp << PAGESHIFT) + VMEM_REGION_SIZE) = value;
 	region1[tmp].valid = 0;
 }
 
-static void free_page_enq(struct pte *region, int vpn) {
-	if (free_pf_head == -1) {
-        free_pf_head = free_pf_tail = region[vpn].pfn;
+static void free_page_enq(int isregion1, int vpn) {
+	struct pte *region = (isregion1?region1:region0);
+    *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_pf_head;
+    free_pf_head = region[vpn].pfn;
+    region[vpn].valid = 0;
+    free_pfn++;
+}
+
+static int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
+	if (free_pfn == 0) {
+		fprintf(stderr, "No enough physical page\n");
+        return -1;
     }
-    else {
-        int new_pnf = region[vpn].pfn;
-        region[vpn].pfn = free_pf_tail;
-        *(int *)((long)vpn << PAGESHIFT) = new_pnf;
-        free_pf_tail = new_pnf;
-    }
+    struct pte *region = (isregion1?region1:region0);
+    region[vpn].valid = 1;
+    region[vpn].kprot = kprot;
+    region[vpn].uprot = uprot;
+    region[vpn].pfn = free_pf_head;
+
+    free_pf_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
+    free_pfn--;
+    return 0;
 }
 
 /*
@@ -166,7 +226,6 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     int text_npg;
     int data_bss_npg;
     int stack_npg;
-
     TracePrintf(0, "LoadProgram '%s', args %p\n", name, args);
 
     if ((fd = open(name, O_RDONLY)) < 0) {
@@ -196,7 +255,6 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     TracePrintf(0, "text_size 0x%lx, data_size 0x%lx, bss_size 0x%lx\n",
         li.text_size, li.data_size, li.bss_size);
     TracePrintf(0, "entry 0x%lx\n", li.entry);
-
     /*
      *  Figure out how many bytes are needed to hold the arguments on
      *  the new stack that we are building.  Also count the number of
@@ -208,7 +266,6 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     }
     argcount = i;
     TracePrintf(0, "LoadProgram: size %d, argcount %d\n", size, argcount);
-
     /*
      *  Now save the arguments in a separate buffer in Region 1, since
      *  we are about to delete all of Region 0.
@@ -290,15 +347,9 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>> of these PTEs to be no longer valid.
     for (i = MEM_INVALID_PAGES; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
         if (region0[i].valid) {
-            free_page_enq(region0, i);
-            region0[i].valid = 0;
+            free_page_enq(0, i);
         }
     }
-
-    if (free_pf_head != -1) {
-    	WriteToPhysPFN(free_pf_tail, -1);
-    }
-
 
     /*
      *  Fill in the page table with the right number of text,
@@ -322,17 +373,11 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>>     uprot = PROT_READ | PROT_EXEC
     // >>>>     pfn   = a new page of physical memory
     for (i = MEM_INVALID_PAGES; i < MEM_INVALID_PAGES + text_npg; i++) {
-        if (free_pf_head == -1) {
+        if (free_page_deq(0, i, PROT_READ | PROT_WRITE, PROT_READ | PROT_EXEC) < 0) {
             free(argbuf);
             close(fd);
             return (-2);
         }
-        region0[i].valid = 1;
-        region0[i].kprot = PROT_READ | PROT_WRITE;
-        region0[i].uprot = PROT_READ | PROT_EXEC;
-        region0[i].pfn = free_pf_head;
-
-        free_pf_head = *(int *)((long)(i << PAGESHIFT));
     }
 
 
@@ -345,17 +390,11 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>>     pfn   = a new page of physical memory
 
     for (i = MEM_INVALID_PAGES + text_npg; i < MEM_INVALID_PAGES + text_npg + data_bss_npg; i++) {
-        if (free_pf_head == -1) {
+        if (free_page_deq(0, i, PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE) < 0) {
             free(argbuf);
             close(fd);
             return (-2);
         }
-        region0[i].valid = 1;
-        region0[i].kprot = PROT_READ | PROT_WRITE;
-        region0[i].uprot = PROT_READ | PROT_WRITE;
-        region0[i].pfn = free_pf_head;
-
-        free_pf_head = *(int *)((long)(i << PAGESHIFT));
     }
 
     /* And finally the user stack pages */
@@ -369,18 +408,12 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>>     pfn   = a new page of physical memory
 
     for (i = 0; i < stack_npg; i++) {
-        if (free_pf_head == -1) {
+    	int index = (USER_STACK_LIMIT >> PAGESHIFT) - 1 - i;
+    	if (free_page_deq(0, index, PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE) < 0) {
             free(argbuf);
             close(fd);
             return (-2);
         }
-        int index = (USER_STACK_LIMIT >> PAGESHIFT) - 1 - i;
-        region0[index].valid = 1;
-        region0[index].kprot = PROT_READ | PROT_WRITE;
-        region0[index].uprot = PROT_READ | PROT_WRITE;
-        region0[index].pfn = free_pf_head;
-
-        free_pf_head = *(int *)((long)(index << PAGESHIFT));
     }
 
     /*
