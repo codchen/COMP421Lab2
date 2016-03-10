@@ -91,9 +91,14 @@ extern void KernelStart(ExceptionStackFrame * frame,
 	}
 
 	//initialize page table
-	region0 = (void *)((long)i << PAGESHIFT);
-	region1 = region0 + (PAGESIZE >> 1);
+	int initial_region_pfn = i;
+	region0 = (struct pte *)((long)initial_region_pfn << PAGESHIFT);
+	region1 = (struct pte *)((long)region0 + (PAGESIZE >> 1));
 	int k_base_pfn = VMEM_1_BASE >> PAGESHIFT;
+	// for (i = 0; i < VMEM_REGION_SIZE >> PAGESHIFT; i++) {
+	// 	region0[i].valid = 0;
+	// 	region1[i].valid = 0;
+	// }
 	for (i = 0; i < KERNEL_STACK_PAGES; i++) {
 		int index = (VMEM_REGION_SIZE >> PAGESHIFT) - i - 1;
 		region0[index].pfn = index;
@@ -107,9 +112,14 @@ extern void KernelStart(ExceptionStackFrame * frame,
 		region1[i - k_base_pfn].kprot = (i<(UP_TO_PAGE(&_etext) >> PAGESHIFT)?PROT_READ | PROT_EXEC:PROT_READ | PROT_WRITE);
 		region1[i - k_base_pfn].valid = 1;
 	}
+	region1[i - k_base_pfn].pfn = initial_region_pfn;
+	region1[i - k_base_pfn].uprot = 0;
+	region1[i - k_base_pfn].kprot = PROT_READ | PROT_WRITE;
+	region1[i - k_base_pfn].valid = 1;
 	WriteRegister(REG_PTR0, (RCS421RegVal)region0);
 	WriteRegister(REG_PTR1, (RCS421RegVal)region1);
-
+	region0 = (struct pte *)((long)(VMEM_REGION_SIZE + (i - k_base_pfn) * PAGESIZE));
+	region1 = (struct pte *)((long)region0 + (PAGESIZE >> 1));
 	//enable VM
 	WriteRegister(REG_VM_ENABLE, 1);
 	WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_ALL);
@@ -131,7 +141,7 @@ extern void KernelStart(ExceptionStackFrame * frame,
 		fprintf(stderr, "Malloc failed\n");
 		return;
 	}
-	running->two_times_pfn_of_pt0 = (long)region0 >> (PAGESHIFT - 1);
+	running->two_times_pfn_of_pt0 = initial_region_pfn << 1;
 	running->pid = 1;
 	running->state = 0;
 	running->time_to_switch = time + 2;
@@ -139,32 +149,6 @@ extern void KernelStart(ExceptionStackFrame * frame,
 	running->parent = NULL;
 	running->exited_children_head = NULL;
 	running->exited_children_tail = NULL;
-}
-
-extern int SetKernelBrk(void *addr) {
-	if (!v_enabled) {
-		if ((long)addr >= VMEM_1_BASE && (long)addr <= VMEM_1_LIMIT) {
-			k_brk = addr;
-			return 0;
-		}
-		else {
-			perror("Brk out of bound.\n");
-			return -1;
-		}
-	}
-	else {
-
-	}
-}
-
-static void WriteToPhysPFN(int pfn, int value) {
-
-	int tmp = (UP_TO_PAGE(k_brk) - VMEM_1_BASE) >> PAGESHIFT;
-	region1[tmp].valid = 1;
-	region1[tmp].pfn = value;
-	region1[tmp].kprot = PROT_READ | PROT_WRITE;
-	*(int *)(long)((tmp << PAGESHIFT) + VMEM_REGION_SIZE) = value;
-	region1[tmp].valid = 0;
 }
 
 static void free_page_enq(int isregion1, int vpn) {
@@ -185,10 +169,47 @@ static int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
     region[vpn].kprot = kprot;
     region[vpn].uprot = uprot;
     region[vpn].pfn = free_pf_head;
-
     free_pf_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
     free_pfn--;
     return 0;
+}
+
+extern int SetKernelBrk(void *addr) {
+	if ((long)addr < VMEM_1_BASE && (long)addr >= VMEM_1_LIMIT) {
+		fprintf(stderr, "Brk out of bound for kernel.\n");
+		return -1;
+	}
+	if (!v_enabled) {
+		k_brk = addr;
+		return 0;
+	}
+	else {
+		int i;
+		if (addr > k_brk) {
+			for (i = (UP_TO_PAGE(k_brk) - VMEM_REGION_SIZE) >> PAGESHIFT; i <= (DOWN_TO_PAGE(addr) - VMEM_REGION_SIZE) >> PAGESHIFT; i++) {
+				if (free_page_deq(1, i, PROT_READ | PROT_WRITE, 0) < 0) {
+					return -1;
+				}
+			}
+		}
+		else {
+			for (i = (DOWN_TO_PAGE(k_brk) - VMEM_REGION_SIZE) >> PAGESHIFT; i >= (UP_TO_PAGE(addr) - VMEM_REGION_SIZE) >> PAGESHIFT; i--) {
+				free_page_enq(1, i);
+			}
+		}
+		k_brk = addr;
+		return 0;
+	}
+}
+
+static void WriteToPhysPFN(int pfn, int value) {
+
+	int tmp = (UP_TO_PAGE(k_brk) - VMEM_1_BASE) >> PAGESHIFT;
+	region1[tmp].valid = 1;
+	region1[tmp].pfn = value;
+	region1[tmp].kprot = PROT_READ | PROT_WRITE;
+	*(int *)(long)((tmp << PAGESHIFT) + VMEM_REGION_SIZE) = value;
+	region1[tmp].valid = 0;
 }
 
 /*
@@ -333,7 +354,6 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>> Initialize sp for the current process to (char *)cpp.
     // >>>> The value of cpp was initialized above.
     frame->sp = (char *)cpp;
-
     /*
      *  Free all the old physical memory belonging to this process,
      *  but be sure to leave the kernel stack for this process (which
@@ -415,7 +435,6 @@ LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
             return (-2);
         }
     }
-
     /*
      *  All pages for the new address space are now in place.  Flush
      *  the TLB to get rid of all the old PTEs from this process, so
