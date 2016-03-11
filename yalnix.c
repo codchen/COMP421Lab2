@@ -20,11 +20,13 @@ typedef struct pcb {
 	int two_times_pfn_of_pt0; //since the page table may be located from the middle of a page 
 	int pid;
 	char state; //RUNNING is 0, READY is 1, WAITBLOCK is 2
-	int time_to_switch;
+	long time_to_switch;
+	int nchild;
 	struct pcb *next;
 	struct pcb *parent;
 	cei *exited_children_head;
 	cei *exited_children_tail;
+	//TODO: user brk
 } pcb;
 
 typedef void (*trap_handler)(ExceptionStackFrame *frame);
@@ -149,6 +151,7 @@ extern void KernelStart(ExceptionStackFrame * frame,
 	running->parent = NULL;
 	running->exited_children_head = NULL;
 	running->exited_children_tail = NULL;
+	running->nchild = 0;
 }
 
 static void free_page_enq(int isregion1, int vpn) {
