@@ -1,5 +1,9 @@
+#ifndef _yalnix_core_h
+#define _yalnix_core_h
+
 #include <comp421/yalnix.h>
 #include <comp421/hardware.h>
+#include "load_program.h"
 
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);	// definition of trap handlers
@@ -16,6 +20,7 @@ typedef struct pcb {
 	cei *exited_children_tail;
 	//TODO: user brk
 } pcb;
+
 typedef struct child_exit_info {
 	int pid;
 	int status;
@@ -27,6 +32,13 @@ void init_interrupt_vector_table();
 void init_initial_page_tables();
 void init_free_page_list();
 void enable_VM();
+
+/* Program Loading Method */
+void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame);
+
+/* Memory Management Util Methods */
+void free_page_enq(int isregion1, int vpn) // Add a physical page corresponding to vpn to free page list
+int free_page_deq(int isregion1, int vpn, int kprot, int uprot) // Assign a physical page to input vpn's pte entry
 
 /* Trap Handlers*/
 void trap_kernel_handler(ExceptionStackFrame *frame);
@@ -40,6 +52,8 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame);
 /* Global Variables */
 extern void *kernel_break = 0;	// brk address of kernel
 extern void *pmem_limit = -1;	// the limit of physical address, will be assigned by KernelStart
-void *free_page_head = -1;	// the head of free page linked list
 extern int num_free_pages = 0;
 extern int vm_enabled = 0;
+extern struct pte *region_0_pt, *region_1_pt;
+
+#endif

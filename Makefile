@@ -34,7 +34,8 @@ ALL = yalnix init
 #	the corresponding source files that make up your kernel.
 #
 KERNEL_OBJS = yalnix.o
-KERNEL_SRCS = yalnix.c
+KERNEL_SRCS = yalnix.c yalnix_core.c load_program.c
+KERNEL_DEPS = yalnix_core.h load_program.h
 
 #
 #	You should not have to modify anything else in this Makefile

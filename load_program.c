@@ -151,7 +151,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>> memory page indicated by that PTE's pfn field.  Set all
     // >>>> of these PTEs to be no longer valid.
     for (i = MEM_INVALID_PAGES; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
-        if (region0[i].valid) {
+        if (region_0_pt[i].valid) {
             free_page_enq(0, i);
         }
     }
