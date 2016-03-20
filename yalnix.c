@@ -27,6 +27,8 @@ typedef struct pcb {
 	cei *exited_children_head;
 	cei *exited_children_tail;
 	//TODO: user brk
+	int brk_pn;
+	int stack_pn;
 } pcb;
 
 typedef void (*trap_handler)(ExceptionStackFrame *frame);
@@ -52,7 +54,7 @@ long time = 0;
 pcb *running;
 pcb *ready_head, *ready_tail;
 pcb *delay_head, *delay_tail;
-pcb *tty_head[NUM_TERMINALS], *tty_tail[NUM_TERMINALS];
+pcb **tty_head[NUM_TERMINALS], **tty_tail[NUM_TERMINALS];
 
 void idle() {
 	while (1) {
@@ -133,25 +135,33 @@ extern void KernelStart(ExceptionStackFrame * frame,
 		fprintf(stderr, "Load init failed: %d\n", init_res);
 		return;
 	}
-	running = malloc(sizeof(pcb));
+	running = calloc(sizeof(pcb));
 	if (running == NULL) {
-		fprintf(stderr, "Malloc failed\n");
+		fprintf(stderr, "Malloc failed: init\n");
 		return;
 	}
-	running->ctx = malloc(sizeof(SavedContext));
+	running->ctx = calloc(sizeof(SavedContext));
 	if (running->ctx == NULL) {
-		fprintf(stderr, "Malloc failed\n");
+		fprintf(stderr, "Malloc failed: running->ctx\n");
 		return;
 	}
 	running->two_times_pfn_of_pt0 = initial_region_pfn << 1;
 	running->pid = 1;
-	running->state = 0;
 	running->time_to_switch = time + 2;
-	running->next = NULL;
-	running->parent = NULL;
-	running->exited_children_head = NULL;
-	running->exited_children_tail = NULL;
-	running->nchild = 0;
+
+	//initialize other pointers
+	ready_head = ready_tail = NULL;
+	delay_head = delay_tail = NULL;
+	tty_head = calloc(sizeof(pcb **) * NUM_TERMINALS);
+	if (tty_head == NULL) {
+		fprintf(stderr, "Calloc failed: tty_head\n");
+		return;
+	}
+	tty_tail = calloc(sizeof(pcb **) * NUM_TERMINALS);
+	if (tty_tail == NULL) {
+		fprintf(stderr, "Calloc failed: tty_tail\n");
+		return;
+	}
 }
 
 static void free_page_enq(int isregion1, int vpn) {

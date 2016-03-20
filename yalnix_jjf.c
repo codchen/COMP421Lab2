@@ -18,9 +18,7 @@ typedef struct child_exit_info {
 } cei;
 typedef struct pcb {
     SavedContext *ctx;
-    unsigned int pt_pfn: 20;
-    unsigned int unused: 11;
-    unsigned int occupies_upper_half: 1;
+    void *pt_physical_addr;
     int pid;
     char state; //RUNNING is 0, READY is 1, WAITBLOCK is 2
     long time_to_switch;
@@ -30,6 +28,8 @@ typedef struct pcb {
     cei *exited_children_head;
     cei *exited_children_tail;
     //TODO: user brk
+    int brk_pn;
+    int stack_pn;
 } pcb;
 
 /* Kernel Start Methods */
@@ -40,7 +40,7 @@ void enable_VM();
 
 /* Program Loading Method */
 void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame);
-int LoadProgram(char *name, char **args, ExceptionStackFrame* frame);   // from load template 
+int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int *brk_pn);   // from load template 
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
@@ -61,7 +61,6 @@ void *pmem_limit = 0;   // the limit of physical address, will be assigned by Ke
 int num_free_pages = 0;
 int vm_enabled = 0;
 struct pte *region_0_pt, *region_1_pt;
-struct pte *vpt;
 int free_page_head = -1;    // the pfn of the head of free page linked list
 long sys_time = 0;  // system time
 
@@ -77,25 +76,20 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     
     // initialize interrupt vector table
     init_interrupt_vector_table();
-    printf("a\n");
     // initialize region 1 & region 0 page table
     // two page tables make up to one page, placed below kernel stack
     init_initial_page_tables();
-    printf("b\n");
 
     // make a list of free physical pages
     init_free_page_list();
-    printf("c\n");
 
     // enable VM
     enable_VM();
-    printf("d\n");
 
     // init idle process
 
     // load first program
     load_program_from_file(cmd_args[0], cmd_args, frame);
-    printf("e\n");
 
 }
 
@@ -104,8 +98,8 @@ extern int SetKernelBrk(void *addr) {
         fprintf(stderr, "Brk out of bound for kernel.\n");
         return -1;
     }
-    //TODO: round up to page
     if (!vm_enabled) {
+        addr = (void *)((long)UP_TO_PAGE((long)addr));
         kernel_break = addr;
         return 0;
     }
@@ -149,18 +143,14 @@ void init_interrupt_vector_table() {
 
 void init_initial_page_tables() {
     // two page tables make up to one page, placed below kernel stack
-    region_0_pt = (struct pte *)((long)VMEM_0_LIMIT - KERNEL_STACK_SIZE - PAGESIZE);
+    region_0_pt = (struct pte *) calloc(2, PAGE_TABLE_SIZE);
     region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
-    printf("o\n");
 
     // setup initial ptes in region 1 page table and region 0 page table
     int page_itr;
-    printf("kernel break %lu\n", UP_TO_PAGE(kernel_break));
-    printf("kernel stack limit %d\n", KERNEL_STACK_LIMIT);
-    printf("etext? %lu\n", UP_TO_PAGE(&_etext));
 
     // init region 0 page table
-    for (page_itr = 0; page_itr < KERNEL_STACK_PAGES; page_itr++) {    
+    for (page_itr = 0; page_itr < KERNEL_STACK_PAGES; page_itr++) {  
         int index = (VMEM_REGION_SIZE >> PAGESHIFT) - page_itr - 1;
         region_0_pt[index].pfn = index;
         region_0_pt[index].uprot = 0;
@@ -169,7 +159,6 @@ void init_initial_page_tables() {
     }
 
     int kernel_base_pfn = VMEM_1_BASE >> PAGESHIFT;
-    vpt = (struct pte *) calloc(2, PAGE_TABLE_SIZE);
     // init region 1 page table
     for (page_itr = kernel_base_pfn; page_itr < UP_TO_PAGE(kernel_break) >> PAGESHIFT; page_itr++) {
         region_1_pt[page_itr - kernel_base_pfn].pfn = page_itr;
@@ -177,12 +166,6 @@ void init_initial_page_tables() {
         region_1_pt[page_itr - kernel_base_pfn].kprot = (page_itr < (UP_TO_PAGE(&_etext) >> PAGESHIFT) ? PROT_READ | PROT_EXEC:PROT_READ | PROT_WRITE);
         region_1_pt[page_itr - kernel_base_pfn].valid = 1;
     }
-
-    // map the page for two page tables to a physical page in kernel heap
-    region_1_pt[((long)vpt - VMEM_REGION_SIZE)>>PAGESHIFT].pfn = ((long)region_0_pt) >> PAGESHIFT;
-    region_1_pt[((long)vpt - VMEM_REGION_SIZE)>>PAGESHIFT].uprot = 0;
-    region_1_pt[((long)vpt - VMEM_REGION_SIZE)>>PAGESHIFT].kprot = PROT_READ | PROT_WRITE;
-    region_1_pt[((long)vpt - VMEM_REGION_SIZE)>>PAGESHIFT].valid = 1;
 
     WriteRegister(REG_PTR0, (RCS421RegVal)region_0_pt);
     WriteRegister(REG_PTR1, (RCS421RegVal)region_1_pt);
@@ -198,20 +181,15 @@ void init_free_page_list() {
     *(int *)((long)page_itr << PAGESHIFT) = MEM_INVALID_PAGES;  // link upper freelist to bottom free pages
     num_free_pages++;
     for (page_itr = MEM_INVALID_PAGES; 
-            page_itr < (DOWN_TO_PAGE(KERNEL_STACK_BASE) >> PAGESHIFT) - 1; 
+            page_itr < (DOWN_TO_PAGE(KERNEL_STACK_BASE) >> PAGESHIFT); 
             page_itr++) {
-        if (page_itr != (DOWN_TO_PAGE(KERNEL_STACK_BASE) >> PAGESHIFT) - 2) // last page doesn't have next pointer
+        if (page_itr != (DOWN_TO_PAGE(KERNEL_STACK_BASE) >> PAGESHIFT) - 1) // last page doesn't have next pointer
             *(int *)((long)page_itr << PAGESHIFT) = page_itr + 1;
         num_free_pages++;
     }
 }
 
 void enable_VM() {
-    // change region 0 and region 1 page tables to their virtual memory addresses
-    // region_0_pt = (struct pte *)((long)(VMEM_REGION_SIZE + (UP_TO_PAGE(kernel_break) - VMEM_1_BASE - PAGESIZE)));
-    // region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
-    region_0_pt = vpt;
-    region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
     WriteRegister(REG_VM_ENABLE, 1);
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_ALL);
     vm_enabled = 1;
@@ -219,8 +197,9 @@ void enable_VM() {
 
 /* Program Loading Method */
 void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame) {
-    int init_res = LoadProgram(names, args, frame);
-    printf("lol\n");
+    int *brk_pn = malloc(sizeof(int));
+    *brk_pn = MEM_INVALID_PAGES;
+    int init_res = LoadProgram(names, args, frame, brk_pn);
     if (init_res < 0) {
         fprintf(stderr, "Load init failed: %d\n", init_res);
         return;
@@ -230,17 +209,12 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
         fprintf(stderr, "Faliled malloc pcb for new program\n");
         return;
     }
-    printf("lol\n");
     running_block->ctx = malloc(sizeof(SavedContext));
-    printf("lol\n");
     if (running_block->ctx == NULL) {
         fprintf(stderr, "Failed malloc ctx for new program\n");
         return;
     }
-    // todo: convert region_0 virtual address to its physical address
-    running_block->pt_pfn = (((long)region_0_pt) >> PAGESHIFT);
-    // todo: convert region_0 virtual address to its physical address
-    running_block->occupies_upper_half = ((long)region_0_pt) % PAGESIZE == 0;
+    running_block->pt_physical_addr = region_0_pt;
     running_block->pid = 1;
     running_block->state = 0;
     running_block->time_to_switch = sys_time + 2;
@@ -249,17 +223,16 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
     running_block->exited_children_head = NULL;
     running_block->exited_children_tail = NULL;
     running_block->nchild = 0;
+    running_block->brk_pn = *brk_pn;
+    running_block->stack_pn = (DOWN_TO_PAGE(frame->sp) >> PAGESHIFT) - 1;
+    free(brk_pn);
 }
 
 /* Memory Management Util Methods */
 /* Given a virtual page number, add its corresponding physical page to free page list */
 void free_page_enq(int isregion1, int vpn) {
     struct pte *region = (isregion1 ? region_1_pt : region_0_pt);
-    printf("aaa\n");
-    printf("%d, %d\n", region[vpn].valid, region[vpn].pfn);
-    printf("addr: %p\n", (void *)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
     *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
-    printf("bbb\n");
     free_page_head = region[vpn].pfn;
     region[vpn].valid = 0;
     num_free_pages++;
@@ -279,6 +252,18 @@ int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
     free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
     num_free_pages--;
     return 0;
+}
+
+void print_pt(){
+    int i;
+    for (i = 0; i < PAGE_TABLE_LEN; i++) {
+        if (region_0_pt[i].valid) {
+            printf("0:%d->%d\n", i, region_0_pt[i].pfn);
+        }
+        if (region_1_pt[i].valid) {
+            printf("1:%d->%d\n", i, region_1_pt[i].pfn);
+        }
+    }
 }
 
 /* Trap Handlers */
@@ -311,7 +296,7 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){}
  *  is no longer runnable, and this function returns -2 for errors
  *  in this case.
  */
-int LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
+int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn) {
     int fd;
     int status;
     struct loadinfo li;
@@ -448,7 +433,6 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
             free_page_enq(0, i);
         }
     }
-    printf("lol\n");
 
     /*
      *  Fill in the page table with the right number of text,
@@ -472,6 +456,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>>     uprot = PROT_READ | PROT_EXEC
     // >>>>     pfn   = a new page of physical memory
     for (i = MEM_INVALID_PAGES; i < MEM_INVALID_PAGES + text_npg; i++) {
+        *brk_pn = *brk_pn + 1;
         if (free_page_deq(0, i, PROT_READ | PROT_WRITE, PROT_READ | PROT_EXEC) < 0) {
             free(argbuf);
             close(fd);
@@ -489,6 +474,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame) {
     // >>>>     pfn   = a new page of physical memory
 
     for (i = MEM_INVALID_PAGES + text_npg; i < MEM_INVALID_PAGES + text_npg + data_bss_npg; i++) {
+        *brk_pn = *brk_pn + 1;
         if (free_page_deq(0, i, PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE) < 0) {
             free(argbuf);
             close(fd);
