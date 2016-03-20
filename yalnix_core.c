@@ -87,7 +87,7 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
 		fprintf(stderr, "Failed malloc ctx for new program\n");
 		return;
 	}
-	
+
 	running_block->two_times_pfn_of_pt0 = region_0_pt >> PAGESHIFT << 1;	// WHAT'S THIS....
 	running_block->pid = 1;
 	running_block->state = 0;
@@ -104,7 +104,6 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
 void free_page_enq(int isregion1, int vpn) {
 	struct pte *region = (isregion1 ? region_1_pt : region_0_pt);
 	region[vpn].valid = 0;
-	// TODO: *(int *)((long)region[vpn].pfn >> PAGESHIFT) = free_page_head;
     *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
     free_page_head = region[vpn].pfn;
     num_free_pages++;
@@ -120,8 +119,7 @@ int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
     region[vpn].valid = 1;
     region[vpn].kprot = kprot;
     region[vpn].uprot = uprot;
-    region[vpn].pfn = free_pf_head;
-    // TODO: free_page_head = *(int *)((long)region[vpn].pfn >> PAGESHIFT);
+    region[vpn].pfn = free_page_head;
     free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
     num_free_pages--;
     return 0;
