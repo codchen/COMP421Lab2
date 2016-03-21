@@ -38,6 +38,9 @@ void init_initial_page_tables();
 void init_free_page_list();
 void enable_VM();
 
+/* utils*/
+void print_pt();
+
 /* Program Loading Method */
 void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame);
 int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int *brk_pn);   // from load template 
@@ -223,11 +226,12 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
         fprintf(stderr, "Faliled malloc pcb for new program\n");
         return;
     }
-    running_block->ctx = malloc(sizeof(SavedContext));
+    running_block->ctx = calloc(1, sizeof(SavedContext));
     if (running_block->ctx == NULL) {
         fprintf(stderr, "Failed malloc ctx for new program\n");
         return;
     }
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)running_block);
     running_block->pt_physical_addr = region_0_pt;
     running_block->pid = 1;
     running_block->state = 0;
@@ -281,6 +285,7 @@ void print_pt(){
 }
 
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+    if (p1 == p2) return ((pcb *)p1)->ctx;
     WriteRegister(REG_PTR0, (RCS421RegVal)(((pcb *)p1)->pt_physical_addr));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     return ((pcb *)p2)->ctx;
