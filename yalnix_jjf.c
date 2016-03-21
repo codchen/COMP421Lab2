@@ -55,6 +55,20 @@ void trap_math_handler(ExceptionStackFrame *frame);
 void trap_tty_receive_handler(ExceptionStackFrame *frame);
 void trap_tty_transmit_handler(ExceptionStackFrame *frame);
 
+/* Kernel Calls*/
+extern int Fork(void);
+extern int Exec(char *, char **);
+extern void Exit(int) __attribute__ ((noreturn));
+extern int Wait(int *);
+extern int GetPid(void);
+extern int Brk(void *);
+extern int Delay(int);
+extern int TtyRead(int, void *, int);
+extern int TtyWrite(int, void *, int);
+
+/* Switch Function*/
+SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2);
+
 /* Global Variables */
 void *kernel_break = 0; // brk address of kernel
 void *pmem_limit = 0;   // the limit of physical address, will be assigned by KernelStart
@@ -264,6 +278,12 @@ void print_pt(){
             printf("1:%d->%d\n", i, region_1_pt[i].pfn);
         }
     }
+}
+
+SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+    WriteRegister(REG_PTR0, (RCS421RegVal)(((pcb *)p1)->pt_physical_addr));
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+    return ((pcb *)p2)->ctx;
 }
 
 /* Trap Handlers */
