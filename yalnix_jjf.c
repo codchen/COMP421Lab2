@@ -11,11 +11,13 @@
 
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
+
 typedef struct child_exit_info {
     int pid;
     int status;
     struct child_exit_info *next;
 } cei;
+
 typedef struct pcb {
     SavedContext *ctx;
     void *pt_physical_addr;
@@ -42,7 +44,7 @@ void enable_VM();
 void print_pt();
 
 /* Program Loading Method */
-void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame);
+void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, void* pt_addr, int pid);
 int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int *brk_pn);   // from load template 
 
 /* Memory Management Util Methods */
@@ -58,7 +60,7 @@ void trap_math_handler(ExceptionStackFrame *frame);
 void trap_tty_receive_handler(ExceptionStackFrame *frame);
 void trap_tty_transmit_handler(ExceptionStackFrame *frame);
 
-/* Kernel Calls*/
+/* Kernel Calls */
 extern int Fork(void);
 extern int Exec(char *, char **);
 extern void Exit(int) __attribute__ ((noreturn));
@@ -68,6 +70,7 @@ extern int Brk(void *);
 extern int Delay(int);
 extern int TtyRead(int, void *, int);
 extern int TtyWrite(int, void *, int);
+
 
 /* Switch Function*/
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2);
@@ -79,8 +82,7 @@ int num_free_pages = 0;
 int vm_enabled = 0;
 struct pte *region_0_pt, *region_1_pt;
 int free_page_head = -1;    // the pfn of the head of free page linked list
-long sys_time = 0;  // system time
-
+unsigned long sys_time = 0;  // system time
 
 pcb *running_block;
 pcb *ready_head, *ready_tail;
@@ -104,9 +106,11 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     enable_VM();
 
     // init idle process
+    // char* idle_proc = "idle";
+    // load_program_from_file(idle_proc, NULL, frame, region_0_pt, 0);
 
     // load first program
-    load_program_from_file(cmd_args[0], cmd_args, frame);
+    load_program_from_file(cmd_args[0], cmd_args, frame, region_0_pt, 1);
 
 }
 
@@ -143,8 +147,6 @@ extern int SetKernelBrk(void *addr) {
     }
 }
 
-
-
 /* KernalStart Method Series */
 void init_interrupt_vector_table() {
     trap_handler *interrupt_vector_table = (trap_handler *) calloc(TRAP_VECTOR_SIZE, sizeof(trap_handler));
@@ -159,7 +161,7 @@ void init_interrupt_vector_table() {
 }
 
 void init_initial_page_tables() {
-    // two page tables make up to one page, placed below kernel stack
+    // malloc page tables in kernel heap
     region_0_pt = (struct pte *) calloc(2, PAGE_TABLE_SIZE);
     region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
 
@@ -212,8 +214,7 @@ void enable_VM() {
     vm_enabled = 1;
 }
 
-/* Program Loading Method */
-void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame) {
+void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, void* pt_addr, int pid) {
     int *brk_pn = malloc(sizeof(int));
     *brk_pn = MEM_INVALID_PAGES;
     int init_res = LoadProgram(names, args, frame, brk_pn);
@@ -232,8 +233,8 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
         return;
     }
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)running_block);
-    running_block->pt_physical_addr = region_0_pt;
-    running_block->pid = 1;
+    running_block->pt_physical_addr = pt_addr;
+    running_block->pid = pid;
     running_block->state = 0;
     running_block->time_to_switch = sys_time + 2;
     running_block->next = NULL;
@@ -244,6 +245,7 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
     running_block->brk_pn = *brk_pn;
     running_block->stack_pn = (DOWN_TO_PAGE(frame->sp) >> PAGESHIFT) - 1;
     free(brk_pn);
+    printf("Successfully load %s into kernel\n", names);
 }
 
 /* Memory Management Util Methods */
@@ -292,13 +294,90 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
 }
 
 /* Trap Handlers */
-void trap_kernel_handler(ExceptionStackFrame *frame){}
-void trap_clock_handler(ExceptionStackFrame *frame){}
-void trap_illegal_handler(ExceptionStackFrame *frame){}
-void trap_memory_handler(ExceptionStackFrame *frame){}
-void trap_math_handler(ExceptionStackFrame *frame){}
-void trap_tty_receive_handler(ExceptionStackFrame *frame){}
-void trap_tty_transmit_handler(ExceptionStackFrame *frame){}
+void trap_kernel_handler(ExceptionStackFrame *frame){
+    printf("Trapped Kernel Handler...\n");
+}
+
+void trap_clock_handler(ExceptionStackFrame *frame){
+    printf("Trapped Clock...\n");
+    sys_time++;
+    printf("Current system time is %lu\n", sys_time);
+    if (running_block->time_to_switch == sys_time) {
+        // get next block in ready Q (is it necessary to switch to idle when this is the only running block?)
+        // context switch
+    }
+
+}
+
+void trap_illegal_handler(ExceptionStackFrame *frame){
+    printf("Trapped Illegal Instruction...\n");
+    int code = frame->code;
+    char error_msg[255];
+    char *reason;
+    switch(code) {
+        case TRAP_ILLEGAL_ILLOPC:
+            reason = "Illegal Opcode";
+            break;
+        case TRAP_ILLEGAL_ILLOPN:
+            reason = "Illegal Operand";
+            break;
+        case TRAP_ILLEGAL_ILLADR:
+            reason = "Illegal Addressing Mode";
+            break;
+        case TRAP_ILLEGAL_ILLTRP:
+            reason = "Illegal Software Trap";
+            break;
+        case TRAP_ILLEGAL_PRVOPC:
+            reason = "Privileged Opcode";
+            break;
+        case TRAP_ILLEGAL_PRVREG:  
+            reason = "Privileged Register";
+            break;
+        case TRAP_ILLEGAL_COPROC:  
+            reason = "Coprocessor Error";
+            break;
+        case TRAP_ILLEGAL_BADSTK:
+            reason = "Bad Stack";
+            break;
+        case TRAP_ILLEGAL_KERNELI:  
+            reason = "Receiving SIGILL from LINUX Kernel";
+            break;
+        case TRAP_ILLEGAL_USERIB:    
+            reason = "Receiving SIGILL or SIGBUS from User";
+            break;
+        case TRAP_ILLEGAL_ADRALN:
+            reason = "Invalid Address Alignment";
+            break;
+        case TRAP_ILLEGAL_ADRERR:
+            reason = "Non-existant Physical Address";
+            break;
+        case TRAP_ILLEGAL_OBJERR:
+            reason = "Object-specific HW Error";
+            break;
+        case TRAP_ILLEGAL_KERNELB:
+            reason = "Receiving SIGBUS from LINUX Kernel";
+            break;
+    }
+    sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
+    fprintf(stderr, error_msg);
+
+    // TODO: Context Switch to next process on ready queue
+    free(reason);
+    // free(error_msg);
+
+}
+void trap_memory_handler(ExceptionStackFrame *frame){
+    printf("Trapped Memory...\n");
+}
+void trap_math_handler(ExceptionStackFrame *frame){
+    printf("Trapped Math...\n");
+}
+void trap_tty_receive_handler(ExceptionStackFrame *frame){
+    printf("Trapped Tty Receive...\n");
+}
+void trap_tty_transmit_handler(ExceptionStackFrame *frame){
+    printf("Trapped Tty Transmit...\n");
+}
 
 /* Load Program */
 /*
