@@ -42,10 +42,11 @@ void enable_VM();
 
 /* utils*/
 void print_pt();
+void *v2p(void *vaddr);
 
 /* Program Loading Method */
-void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, void* pt_addr, int pid);
-int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int *brk_pn);   // from load template 
+pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, struct pte *pt_addr, int pid);
+int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int *brk_pn, struct pte *pt_addr);   // from load template 
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
@@ -83,6 +84,7 @@ int vm_enabled = 0;
 struct pte *region_0_pt, *region_1_pt;
 int free_page_head = -1;    // the pfn of the head of free page linked list
 unsigned long sys_time = 0;  // system time
+int next_pid = 0;
 
 pcb *running_block;
 pcb *ready_head, *ready_tail;
@@ -105,12 +107,13 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     // enable VM
     enable_VM();
 
+    //new exceptionframe
     // init idle process
     // char* idle_proc = "idle";
     // load_program_from_file(idle_proc, NULL, frame, region_0_pt, 0);
 
     // load first program
-    load_program_from_file(cmd_args[0], cmd_args, frame, region_0_pt, 1);
+    running_block = load_program_from_file(cmd_args[0], cmd_args, frame, region_0_pt, 1);
 
 }
 
@@ -214,44 +217,44 @@ void enable_VM() {
     vm_enabled = 1;
 }
 
-void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, void* pt_addr, int pid) {
+pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, struct pte *pt_addr, int pid) {
     int *brk_pn = malloc(sizeof(int));
     *brk_pn = MEM_INVALID_PAGES;
-    int init_res = LoadProgram(names, args, frame, brk_pn);
+    int init_res = LoadProgram(names, args, frame, brk_pn, pt_addr);
     if (init_res < 0) {
         fprintf(stderr, "Load init failed: %d\n", init_res);
-        return;
+        return NULL;
     }
-    running_block = malloc(sizeof(pcb));
-    if (running_block == NULL) {
+    pcb *new_process = malloc(sizeof(pcb));
+    if (new_process == NULL) {
         fprintf(stderr, "Faliled malloc pcb for new program\n");
-        return;
+        return NULL;
     }
-    running_block->ctx = calloc(1, sizeof(SavedContext));
-    if (running_block->ctx == NULL) {
+    new_process->ctx = calloc(1, sizeof(SavedContext));
+    if (new_process->ctx == NULL) {
         fprintf(stderr, "Failed malloc ctx for new program\n");
-        return;
+        return NULL;
     }
-    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)running_block);
-    running_block->pt_physical_addr = pt_addr;
-    running_block->pid = pid;
-    running_block->state = 0;
-    running_block->time_to_switch = sys_time + 2;
-    running_block->next = NULL;
-    running_block->parent = NULL;
-    running_block->exited_children_head = NULL;
-    running_block->exited_children_tail = NULL;
-    running_block->nchild = 0;
-    running_block->brk_pn = *brk_pn;
-    running_block->stack_pn = (DOWN_TO_PAGE(frame->sp) >> PAGESHIFT) - 1;
+    ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, (void *)new_process);
+    new_process->pt_physical_addr = v2p(pt_addr);
+    new_process->pid = pid;
+    new_process->state = 0;
+    new_process->time_to_switch = sys_time + 2;
+    new_process->next = NULL;
+    new_process->parent = NULL;
+    new_process->exited_children_head = NULL;
+    new_process->exited_children_tail = NULL;
+    new_process->nchild = 0;
+    new_process->brk_pn = *brk_pn;
+    new_process->stack_pn = (DOWN_TO_PAGE(frame->sp) >> PAGESHIFT) - 1;
     free(brk_pn);
     printf("Successfully load %s into kernel\n", names);
+    return new_process;
 }
 
 /* Memory Management Util Methods */
 /* Given a virtual page number, add its corresponding physical page to free page list */
-void free_page_enq(int isregion1, int vpn) {
-    struct pte *region = (isregion1 ? region_1_pt : region_0_pt);
+void free_page_enq(int isregion1, int vpn, struct pte *region) {
     *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
     free_page_head = region[vpn].pfn;
     region[vpn].valid = 0;
@@ -259,12 +262,11 @@ void free_page_enq(int isregion1, int vpn) {
 }
 
 /* Given a virtual page number, assign a physical page to its corresponding pte entry */
-int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
+int free_page_deq(int isregion1, int vpn, int kprot, int uprot, struct pte *region) {
     if (num_free_pages == 0) {
         fprintf(stderr, "No enough physical page\n");
         return -1;
     }
-    struct pte *region = (isregion1 ? region_1_pt:region_0_pt);
     region[vpn].valid = 1;
     region[vpn].kprot = kprot;
     region[vpn].uprot = uprot;
@@ -272,6 +274,12 @@ int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
     free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
     num_free_pages--;
     return 0;
+}
+
+void *v2p(void *vaddr) {
+    struct pte *region = (long)vaddr<VMEM_REGION_SIZE?region_0_pt:region_1_pt;
+    if ((long)vaddr >= VMEM_REGION_SIZE) vaddr -= VMEM_REGION_SIZE;
+    return (void *)((long)((region[(long)vaddr>>PAGESHIFT].pfn<<PAGESHIFT)+(long)vaddr%PAGESIZE));
 }
 
 void print_pt(){
@@ -287,7 +295,18 @@ void print_pt(){
 }
 
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
-    if (p1 == p2) return ((pcb *)p1)->ctx;
+    if (p1 == p2) return ((pcb *)p1)->ctx; //initialize SavedContext for currently running process
+    if (p2 == NULL) {                      //initialize SavedContext and copy kernel stack for a newly created (not running) process
+        int i;
+        for (i = 0; i < KERNEL_STACK_PAGES; i++) {
+            int pt_index = PAGE_TABLE_LEN - 1 - i;
+            if (free_page_deq(0, pt_index, region_0_pt[pt_index].kprot, region_0_pt[pt_index].uprot) < 0) {
+                fprintf(stderr, "cannot copy kernel stack\n");
+                break;
+            }
+
+        }
+    }
     WriteRegister(REG_PTR0, (RCS421RegVal)(((pcb *)p1)->pt_physical_addr));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     return ((pcb *)p2)->ctx;
@@ -400,7 +419,7 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
  *  is no longer runnable, and this function returns -2 for errors
  *  in this case.
  */
-int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn) {
+int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn, struct pte *pt_addr) {
     int fd;
     int status;
     struct loadinfo li;
@@ -533,7 +552,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
     // >>>> memory page indicated by that PTE's pfn field.  Set all
     // >>>> of these PTEs to be no longer valid.
     for (i = MEM_INVALID_PAGES; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
-        if (region_0_pt[i].valid) {
+        if (pt_addr[i].valid) {
             free_page_enq(0, i);
         }
     }
@@ -549,7 +568,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
     // >>>> Leave the first MEM_INVALID_PAGES number of PTEs in the
     // >>>> Region 0 page table unused (and thus invalid)
      for (i = 0; i < MEM_INVALID_PAGES; i++) {
-        region_0_pt[i].valid = 0;
+        pt_addr[i].valid = 0;
     }
 
     /* First, the text pages */
@@ -635,7 +654,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
     // >>>> For text_npg number of PTEs corresponding to the user text
     // >>>> pages, set each PTE's kprot to PROT_READ | PROT_EXEC.
     for (i = MEM_INVALID_PAGES; i < MEM_INVALID_PAGES + text_npg; i++) {
-        region_0_pt[i].kprot = PROT_READ | PROT_EXEC;
+        pt_addr[i].kprot = PROT_READ | PROT_EXEC;
     }
 
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
