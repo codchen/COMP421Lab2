@@ -20,7 +20,7 @@ typedef struct child_exit_info {
 
 typedef struct pcb {
     SavedContext *ctx;
-    void *pt_physical_addr;
+    struct pte *pt_virtual_addr;
     int pid;
     char state; //RUNNING is 0, READY is 1, WAITBLOCK is 2
     long time_to_switch;
@@ -233,7 +233,7 @@ void load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
         return;
     }
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)running_block);
-    running_block->pt_physical_addr = pt_addr;
+    running_block->pt_virtual_addr = pt_addr;
     running_block->pid = pid;
     running_block->state = 0;
     running_block->time_to_switch = sys_time + 2;
@@ -288,7 +288,7 @@ void print_pt(){
 
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     if (p1 == p2) return ((pcb *)p1)->ctx;
-    WriteRegister(REG_PTR0, (RCS421RegVal)(((pcb *)p1)->pt_physical_addr));
+    WriteRegister(REG_PTR0, (RCS421RegVal)(((pcb *)p1)->pt_virtual_addr));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     return ((pcb *)p2)->ctx;
 }
