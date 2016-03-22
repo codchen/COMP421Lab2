@@ -113,7 +113,7 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     // load_program_from_file(idle_proc, NULL, frame, region_0_pt, 0);
 
     // load first program
-    running_block = load_program_from_file(cmd_args[0], cmd_args, frame, region_0_pt, 1);
+    running_block = load_program_from_file(cmd_args[0], cmd_args, frame, region_0_pt, next_pid++);
 
 }
 
@@ -236,7 +236,7 @@ pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
         return NULL;
     }
     ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, (void *)new_process);
-    new_process->pt_physical_addr = v2p(pt_addr);
+    new_process->pt_virtual_addr = pt_addr;
     new_process->pid = pid;
     new_process->state = 0;
     new_process->time_to_switch = sys_time + 2;
