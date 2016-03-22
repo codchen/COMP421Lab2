@@ -3,9 +3,8 @@
 
 int main(int argc, char **argv)
 {
-    fprintf(stdout, "Hello World");
+    fprintf(stdout, "Hello World\n");
     while (1) {
-
     }
     return 0;
 }

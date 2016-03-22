@@ -44,13 +44,18 @@ void enable_VM();
 void print_pt();
 void *v2p(void *vaddr);
 
+/* process initialization*/
+pcb *init_new_process(struct pte *pt_addr, int pid, int if_copy_kernel);
+
 /* Program Loading Method */
-pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, struct pte *pt_addr, int pid);
-int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int *brk_pn, struct pte *pt_addr);   // from load template 
+void load_program_from_file(char *names, char **args);
+int LoadProgram(char *name, char **args, int *brk_pn);   // from load template 
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
 int free_page_deq(int isregion1, int vpn, int kprot, int uprot); // Assign a physical page to input vpn's pte entry
+void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn);
+void clear_pte(int isregion1, int vpn);
 
 /* Trap Handlers*/
 void trap_kernel_handler(ExceptionStackFrame *frame);
@@ -86,12 +91,17 @@ int free_page_head = -1;    // the pfn of the head of free page linked list
 unsigned long sys_time = 0;  // system time
 int next_pid = 0;
 
-pcb *running_block;
+ExceptionStackFrame *EXCEPTION_FRAME_ADDR; //need further check!!!
+
+pcb *running_block; //when updated, update region_0_pt also!!!
 pcb *ready_head, *ready_tail;
 pcb *delay_head, *delay_tail;
 pcb *tty_head[NUM_TERMINALS], *tty_tail[NUM_TERMINALS];
+pcb *idle;
+int init_returned = 0;
 
 extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void *orig_brk, char **cmd_args) {
+    EXCEPTION_FRAME_ADDR = frame;
     kernel_break = orig_brk;
     pmem_limit = (void *)((long)PMEM_BASE + pmem_size);
     
@@ -109,12 +119,21 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
 
     //new exceptionframe
     // init idle process
-    // char* idle_proc = "idle";
-    // load_program_from_file(idle_proc, NULL, frame, region_0_pt, 0);
-
-    // load first program
-    running_block = load_program_from_file(cmd_args[0], cmd_args, frame, region_0_pt, next_pid++);
-
+    char* idle_proc = "idle";
+    struct pte *new_region0 = calloc(1, PAGE_TABLE_SIZE); //should not calloc! needs to be physically contiguous
+    if (new_region0 == NULL) {
+        fprintf(stderr, "calloc error\n");
+        return;
+    }
+    idle = init_new_process(new_region0, next_pid++, 1);
+    if (init_returned) {
+        load_program_from_file(idle_proc, NULL);
+    }
+    else {
+        init_returned = 1;
+        running_block = init_new_process(region_0_pt, next_pid++, 0);
+        load_program_from_file(cmd_args[0], cmd_args);
+    }
 }
 
 extern int SetKernelBrk(void *addr) {
@@ -145,7 +164,7 @@ extern int SetKernelBrk(void *addr) {
                 free_page_enq(1, i);
             }
         }
-        kernel_break = addr;
+        kernel_break = (void *)UP_TO_PAGE(addr);
         return 0;
     }
 }
@@ -217,14 +236,7 @@ void enable_VM() {
     vm_enabled = 1;
 }
 
-pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame, struct pte *pt_addr, int pid) {
-    int *brk_pn = malloc(sizeof(int));
-    *brk_pn = MEM_INVALID_PAGES;
-    int init_res = LoadProgram(names, args, frame, brk_pn, pt_addr);
-    if (init_res < 0) {
-        fprintf(stderr, "Load init failed: %d\n", init_res);
-        return NULL;
-    }
+pcb *init_new_process(struct pte *pt_addr, int pid, int if_copy_kernel) {
     pcb *new_process = malloc(sizeof(pcb));
     if (new_process == NULL) {
         fprintf(stderr, "Faliled malloc pcb for new program\n");
@@ -235,7 +247,6 @@ pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
         fprintf(stderr, "Failed malloc ctx for new program\n");
         return NULL;
     }
-    ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, (void *)new_process);
     new_process->pt_virtual_addr = pt_addr;
     new_process->pid = pid;
     new_process->state = 0;
@@ -245,35 +256,64 @@ pcb *load_program_from_file(char *names, char **args, ExceptionStackFrame* frame
     new_process->exited_children_head = NULL;
     new_process->exited_children_tail = NULL;
     new_process->nchild = 0;
-    new_process->brk_pn = *brk_pn;
-    new_process->stack_pn = (DOWN_TO_PAGE(frame->sp) >> PAGESHIFT) - 1;
+    if (running_block != NULL) {
+        new_process->brk_pn = running_block->brk_pn;
+        new_process->stack_pn = running_block->stack_pn;
+    }
+    ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, if_copy_kernel?NULL:(void *)new_process);
+    return new_process;
+}
+
+void load_program_from_file(char *names, char **args) {
+    int *brk_pn = malloc(sizeof(int));
+    *brk_pn = MEM_INVALID_PAGES;
+    int init_res = LoadProgram(names, args, brk_pn);
+    if (init_res < 0) {
+        fprintf(stderr, "Load init failed: %d\n", init_res);
+        return;
+    }
+    running_block->brk_pn = *brk_pn;
+    running_block->stack_pn = (DOWN_TO_PAGE(((ExceptionStackFrame *)((long)EXCEPTION_FRAME_ADDR))->sp) >> PAGESHIFT) - 1;
     free(brk_pn);
     printf("Successfully load %s into kernel\n", names);
-    return new_process;
 }
 
 /* Memory Management Util Methods */
 /* Given a virtual page number, add its corresponding physical page to free page list */
-void free_page_enq(int isregion1, int vpn, struct pte *region) {
+void free_page_enq(int isregion1, int vpn) {
+    struct pte *region = isregion1?region_1_pt:region_0_pt;
     *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
     free_page_head = region[vpn].pfn;
-    region[vpn].valid = 0;
+    clear_pte(isregion1, vpn);
     num_free_pages++;
 }
 
 /* Given a virtual page number, assign a physical page to its corresponding pte entry */
-int free_page_deq(int isregion1, int vpn, int kprot, int uprot, struct pte *region) {
+int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
     if (num_free_pages == 0) {
         fprintf(stderr, "No enough physical page\n");
         return -1;
     }
+    struct pte *region = isregion1?region_1_pt:region_0_pt;
+    set_pte(isregion1, vpn, kprot, uprot,free_page_head);
+    free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
+    num_free_pages--;
+    return region[vpn].pfn;
+}
+
+void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn) {
+    struct pte *region = isregion1?region_1_pt:region_0_pt;
     region[vpn].valid = 1;
     region[vpn].kprot = kprot;
     region[vpn].uprot = uprot;
-    region[vpn].pfn = free_page_head;
-    free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
-    num_free_pages--;
-    return 0;
+    region[vpn].pfn = pfn;
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
+}
+
+void clear_pte(int isregion1, int vpn) {
+    struct pte *region = isregion1?region_1_pt:region_0_pt;
+    region[vpn].valid = 0;
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
 }
 
 void *v2p(void *vaddr) {
@@ -295,21 +335,36 @@ void print_pt(){
 }
 
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
-    if (p1 == p2) return ((pcb *)p1)->ctx; //initialize SavedContext for currently running process
-    if (p2 == NULL) {                      //initialize SavedContext and copy kernel stack for a newly created (not running) process
+    pcb *pp1 = (pcb *)p1;
+    pcb *pp2 = (pcb *)p2;
+    if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
+    if (pp2 == NULL) {                      //initialize SavedContext and copy kernel stack for a newly created (not running) process
         int i;
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
+            if ((long)kernel_break >= VMEM_LIMIT) {
+                fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
+                break;
+            }
             int pt_index = PAGE_TABLE_LEN - 1 - i;
-            if (free_page_deq(0, pt_index, region_0_pt[pt_index].kprot, region_0_pt[pt_index].uprot) < 0) {
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1)>>PAGESHIFT;
+            int pfn = free_page_deq(1, k_index, PROT_ALL, PROT_NONE);
+            if (pfn < 0) {
                 fprintf(stderr, "cannot copy kernel stack\n");
                 break;
             }
+            memcpy((void*)((long)(UP_TO_PAGE(kernel_break + 1))), (void *)((long)(pt_index<<PAGESHIFT)), PAGESIZE);
+            clear_pte(1, k_index);
 
+            pp1->pt_virtual_addr[pt_index].valid = 1;
+            pp1->pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
+            pp1->pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
+            pp1->pt_virtual_addr[pt_index].pfn = pfn;
         }
+        return pp1->ctx;
     }
-    WriteRegister(REG_PTR0, (RCS421RegVal)(((pcb *)p1)->pt_virtual_addr));
+    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(v2p(pp2->pt_virtual_addr))));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-    return ((pcb *)p2)->ctx;
+    return pp2->ctx;
 }
 
 /* Trap Handlers */
@@ -386,7 +441,13 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
 
 }
 void trap_memory_handler(ExceptionStackFrame *frame){
-    printf("Trapped Memory...\n");
+    // unsigned char *bytes = (unsigned char *)((long)16<<PAGESHIFT);
+    // int i;
+    // for (i = 0; i < PAGESIZE; i++) {
+    //     if (bytes[i] != 0) printf("%d:%02X ", i,(unsigned)bytes[i]);
+    // }
+    // printf("\n");
+    // printf("Trapped Memory...%p, %p, %p\n", frame->pc, frame->sp, frame->addr);
 }
 void trap_math_handler(ExceptionStackFrame *frame){
     printf("Trapped Math...\n");
@@ -419,7 +480,7 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
  *  is no longer runnable, and this function returns -2 for errors
  *  in this case.
  */
-int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn, struct pte *pt_addr) {
+int LoadProgram(char *name, char **args, int* brk_pn) {
     int fd;
     int status;
     struct loadinfo li;
@@ -536,7 +597,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
         close(fd);
         return (-1);
     }
-
+    ExceptionStackFrame *frame = (ExceptionStackFrame *)((long)EXCEPTION_FRAME_ADDR);
     // >>>> Initialize sp for the current process to (char *)cpp.
     // >>>> The value of cpp was initialized above.
     frame->sp = (char *)cpp;
@@ -552,7 +613,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
     // >>>> memory page indicated by that PTE's pfn field.  Set all
     // >>>> of these PTEs to be no longer valid.
     for (i = MEM_INVALID_PAGES; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
-        if (pt_addr[i].valid) {
+        if (region_0_pt[i].valid) {
             free_page_enq(0, i);
         }
     }
@@ -568,7 +629,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
     // >>>> Leave the first MEM_INVALID_PAGES number of PTEs in the
     // >>>> Region 0 page table unused (and thus invalid)
      for (i = 0; i < MEM_INVALID_PAGES; i++) {
-        pt_addr[i].valid = 0;
+        region_0_pt[i].valid = 0;
     }
 
     /* First, the text pages */
@@ -654,7 +715,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
     // >>>> For text_npg number of PTEs corresponding to the user text
     // >>>> pages, set each PTE's kprot to PROT_READ | PROT_EXEC.
     for (i = MEM_INVALID_PAGES; i < MEM_INVALID_PAGES + text_npg; i++) {
-        pt_addr[i].kprot = PROT_READ | PROT_EXEC;
+        region_0_pt[i].kprot = PROT_READ | PROT_EXEC;
     }
 
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
@@ -664,6 +725,7 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
      */
     memset((void *)(MEM_INVALID_SIZE + li.text_size + li.data_size),
          '\0', li.bss_size);
+
 
     /*
      *  Set the entry point in the exception frame.
@@ -700,5 +762,6 @@ int LoadProgram(char *name, char **args, ExceptionStackFrame* frame, int* brk_pn
         frame->regs[i] = 0;
     }
     frame->psr = 0;
+
     return (0);
 }
