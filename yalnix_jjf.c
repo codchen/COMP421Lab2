@@ -127,7 +127,11 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     }
     idle = init_new_process(new_region0, next_pid++, 1);
     if (init_returned) {
-        load_program_from_file(idle_proc, NULL);
+        char **args = calloc(1, sizeof(char *));
+        if (args == NULL) return;
+        args[0] = NULL;
+        load_program_from_file(idle_proc, args);
+        free(args);
     }
     else {
         init_returned = 1;
@@ -269,7 +273,7 @@ void load_program_from_file(char *names, char **args) {
     *brk_pn = MEM_INVALID_PAGES;
     int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
-        fprintf(stderr, "Load init failed: %d\n", init_res);
+        fprintf(stderr, "Load %s failed: %d\n", names, init_res);
         return;
     }
     running_block->brk_pn = *brk_pn;
@@ -362,8 +366,10 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         }
         return pp1->ctx;
     }
+    //TODO: update region_0_pt
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(v2p(pp2->pt_virtual_addr))));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+    region_0_pt = pp2->pt_virtual_addr;
     return pp2->ctx;
 }
 
@@ -496,7 +502,6 @@ int LoadProgram(char *name, char **args, int* brk_pn) {
     int data_bss_npg;
     int stack_npg;
     TracePrintf(0, "LoadProgram '%s', args %p\n", name, args);
-
     if ((fd = open(name, O_RDONLY)) < 0) {
         TracePrintf(0, "LoadProgram: can't open file '%s'\n", name);
         return (-1);
@@ -566,7 +571,6 @@ int LoadProgram(char *name, char **args, int* brk_pn) {
 
     TracePrintf(0, "LoadProgram: text_npg %d, data_bss_npg %d, stack_npg %d\n",
        text_npg, data_bss_npg, stack_npg);
-
     /*
      *  Make sure we will leave at least one page between heap and stack
      */
@@ -618,7 +622,6 @@ int LoadProgram(char *name, char **args, int* brk_pn) {
             free_page_enq(0, i);
         }
     }
-
     /*
      *  Fill in the page table with the right number of text,
      *  data+bss, and stack pages.  We set all the text pages
@@ -632,7 +635,6 @@ int LoadProgram(char *name, char **args, int* brk_pn) {
      for (i = 0; i < MEM_INVALID_PAGES; i++) {
         region_0_pt[i].valid = 0;
     }
-
     /* First, the text pages */
     // >>>> For the next text_npg number of PTEs in the Region 0
     // >>>> page table, initialize each PTE:
@@ -648,7 +650,6 @@ int LoadProgram(char *name, char **args, int* brk_pn) {
             return (-2);
         }
     }
-
 
     /* Then the data and bss pages */
     // >>>> For the next data_bss_npg number of PTEs in the Region 0
