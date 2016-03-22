@@ -379,6 +379,7 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     if (running_block->time_to_switch == sys_time) {
         // get next block in ready Q (is it necessary to switch to idle when this is the only running block?)
         // context switch
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)idle);
     }
 
 }
