@@ -144,7 +144,6 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
         fprintf(stderr, "Error allocate free physical page table\n");
         return;
     }
-
     idle_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
     printf("f\n");
     if (init_returned) {
@@ -176,7 +175,8 @@ extern int SetKernelBrk(void *addr) {
         int i;
         if (addr > kernel_break) {
             printf("case 1\n");
-            for (i = (UP_TO_PAGE(kernel_break) - VMEM_REGION_SIZE) >> PAGESHIFT; i <= (DOWN_TO_PAGE(addr) - VMEM_REGION_SIZE) >> PAGESHIFT; i++) {
+            for (i = (UP_TO_PAGE(kernel_break) - VMEM_1_BASE) >> PAGESHIFT; 
+                    i <= (DOWN_TO_PAGE(addr) - VMEM_1_BASE) >> PAGESHIFT; i++) {
                 printf("%d\n", i);
                 if (free_page_deq(REGION_1, i, PROT_READ | PROT_WRITE, 0) < 0) {
                     return -1;
@@ -369,7 +369,6 @@ void clear_pte(int isregion1, int vpn) {
 /* Return a new physical page table */
 void *allocate_physical_pt() {
     void *res;
-    print_pt();
     if (upper_next_pt_pfn != -1) {
         res = (void *)((long)(upper_next_pt_pfn << PAGESHIFT) + PAGE_TABLE_LEN);
         upper_next_pt_pfn = read_from_pfn(res);
@@ -385,12 +384,8 @@ void *allocate_physical_pt() {
             return NULL;
         }
         res = (void *)((long)(free_page_head << PAGESHIFT));
-        printf("qbbb\n");
         free_page_head = read_from_pfn(res);
-        //free_page_head = *(int *)res;
         // add half of the page to upper_next_pt_pfn
-        printf("qccc \n");
-
         add_half_free_pt((void *)((long)res + PAGE_TABLE_LEN));   
     }
     return res;
@@ -415,16 +410,11 @@ int read_from_pfn(void *physical_addr) {
         // TODO: ERROR CHECK
         return -1;
     }
-    int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1) >> PAGESHIFT;
-    int k_prime_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
 
-    //long a = VMEM_REGION_SIZE + PAGESIZE * k_prime_index + (long)physical_addr % PAGESIZE;
-    //int b = *(int *) physical_addr;
-    //printf("a = %lu, b = %lu\n", a, (long)physical_addr);
-
-    set_pte(REGION_1, k_prime_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
-    int res = *(int *)(VMEM_REGION_SIZE + k_prime_index + (long)physical_addr % PAGESIZE);
-    clear_pte(REGION_1, k_prime_index);   // why clear?
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
+    int res = *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE);
+    clear_pte(REGION_1, k_index);   // why clear?
     return res;
 }
 
@@ -434,17 +424,15 @@ void write_to_pfn(void *physical_addr, int towrite) {
         fprintf(stderr, "Kernel virtual space full, cannot write to physical address\n");
         return;
     }
-    int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1) >>PAGESHIFT;
-    int k_prime_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-    set_pte(REGION_1, k_prime_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
-    *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_prime_index + (long)physical_addr % PAGESIZE) = towrite;
-    clear_pte(REGION_1, k_prime_index);
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
+    *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE) = towrite;
+    clear_pte(REGION_1, k_index);
 }
 
 void validate_region_0_pt(pcb *proc) {
     int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 2;
-    region_1_pt[region_0_pt_idx].valid = 1;
-    region_1_pt[region_0_pt_idx].pfn = (long)proc->pt_phys_addr;
+    set_pte(REGION_1, region_0_pt_idx, PROT_ALL, PROT_NONE, proc->pt_phys_addr);
 }
 
 void invalidate_region_0_pt() {
@@ -474,6 +462,7 @@ void print_pt(){
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     pcb *pp1 = (pcb *)p1;
     pcb *pp2 = (pcb *)p2;
+    printf("Starts context switching...\n");
     if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
     if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
         int i;
@@ -484,18 +473,18 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
                 break;
             }
             int pt_index = PAGE_TABLE_LEN - 1 - i;
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1) >> PAGESHIFT;
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
             int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
             if (pfn < 0) {
                 fprintf(stderr, "cannot copy kernel stack\n");
                 break;
             }
             printf("pt_index %d, KERNEL_STACK_BASE %d\n", pt_index, KERNEL_STACK_BASE);
-            memcpy((void *)((long)(UP_TO_PAGE(kernel_break + 1))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
+            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
             clear_pte(REGION_1, k_index);
 
             set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_phys_addr) >> PAGESHIFT);
-            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break + 1)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
+            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
             pp1_pt_virtual_addr[pt_index].valid = 1;
             pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
             pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
@@ -505,7 +494,12 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         return pp1->ctx;
     }
 
+    print_pt();
+    printf("lol\n");
+    TracePrintf(0, "ContextSwitch: \n");
+
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
+    print_pt();
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
 
     // update 
