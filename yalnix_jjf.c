@@ -20,7 +20,7 @@ typedef struct child_exit_info {
 
 typedef struct pcb {
     SavedContext *ctx;
-    struct pte *pt_virtual_addr;
+    void *pt_physical_addr;
     int pid;
     char state; //RUNNING is 0, READY is 1, WAITBLOCK is 2
     long time_to_switch;
@@ -56,6 +56,10 @@ void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding
 int free_page_deq(int isregion1, int vpn, int kprot, int uprot); // Assign a physical page to input vpn's pte entry
 void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn);
 void clear_pte(int isregion1, int vpn);
+void *allocate_physical_pt();
+void free_physical_pt(void *physical_pt);
+int read_from_pfn(void *physical_addr);
+void write_to_pfn(void *physical_addr, int towrite);
 
 /* Trap Handlers*/
 void trap_kernel_handler(ExceptionStackFrame *frame);
@@ -90,6 +94,7 @@ struct pte *region_0_pt, *region_1_pt;
 int free_page_head = -1;    // the pfn of the head of free page linked list
 unsigned long sys_time = 0;  // system time
 int next_pid = 0;
+int upper_pt_next = -1, lower_pt_next = -1;
 
 ExceptionStackFrame *EXCEPTION_FRAME_ADDR; //need further check!!!
 
@@ -319,6 +324,39 @@ void clear_pte(int isregion1, int vpn) {
     region[vpn].valid = 0;
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
 }
+
+void *allocate_physical_pt() {
+    void *res;
+    if (upper_pt_next != -1) {
+        res = (void *)((long)(upper_pt_next*PAGESIZE + PAGESIZE/2));
+        set_pte(1, k_index, PROT_ALL, PROT_NONE, upper_pt_next);
+        upper_pt_next = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index + PAGESIZE / 2);
+        clear_pte(1, k_index);
+    }
+    else if (lower_pt_next != -1) {
+        res = (void *)((long)(lower_pt_next*PAGESIZE));
+        set_pte(1, k_index, PROT_ALL, PROT_NONE, lower_pt_next);
+        lower_pt_next = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index);
+        clear_pte(1, k_index);
+    }
+    else {
+
+    }
+    return res;
+}
+
+void free_physical_pt(void *physical_pt);
+
+int read_from_pfn(void *physical_addr) {
+    if ((long)kernel_break >= VMEM_LIMIT) {
+        fprintf(stderr, "Kernel virtual space full, cannot read from physical address\n");
+        return -1;
+    }
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1)>>PAGESHIFT;
+    
+}
+
+void write_to_pfn(void *physical_addr, int towrite);
 
 void *v2p(void *vaddr) {
     struct pte *region = (long)vaddr<VMEM_REGION_SIZE?region_0_pt:region_1_pt;
