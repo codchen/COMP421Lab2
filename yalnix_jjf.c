@@ -112,8 +112,8 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     
     // initialize interrupt vector table
     init_interrupt_vector_table();
-    // initialize region 1 & region 0 page table
-    // two page tables make up to one page, placed below kernel stack
+
+    // initialize region 1 & region 0 page table. they are located at the top of region 1
     init_initial_page_tables();
 
     // make a list of free physical pages
@@ -193,8 +193,12 @@ void init_interrupt_vector_table() {
 
 void init_initial_page_tables() {
     // malloc page tables in kernel heap
-    region_0_pt = (struct pte *) calloc(2, PAGE_TABLE_SIZE);
-    region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
+    //region_0_pt = (struct pte *) calloc(2, PAGE_TABLE_SIZE);
+    //region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
+
+    // initial region 0 & 1 page tables are placed at the top page of region 1
+    region_0_pt = (struct pte *) DOWN_TO_PAGE(pmem_limit) - PAGESIZE;
+    region_1_pt = (struct pte *) region_0_pt + PAGE_TABLE_SIZE;
 
     // setup initial ptes in region 1 page table and region 0 page table
     int page_itr;
@@ -217,6 +221,12 @@ void init_initial_page_tables() {
         region_1_pt[page_itr - kernel_base_pfn].valid = 1;
     }
 
+    // init pte for two page tables
+    region_1_pt[page_itr - kernel_base_pfn].pfn = (long)region_0_pt >> PAGESHIFT;
+    region_1_pt[page_itr - kernel_base_pfn].uprot = 0;
+    region_1_pt[page_itr - kernel_base_pfn].kprot = PROT_READ | PROT_WRITE;
+    region_1_pt[page_itr - kernel_base_pfn].valid = 1;
+
     WriteRegister(REG_PTR0, (RCS421RegVal)region_0_pt);
     WriteRegister(REG_PTR1, (RCS421RegVal)region_1_pt);
 }
@@ -224,7 +234,7 @@ void init_initial_page_tables() {
 void init_free_page_list() {
     free_page_head = UP_TO_PAGE(kernel_break) >> PAGESHIFT;
     int page_itr;
-    for (page_itr = free_page_head; page_itr < (DOWN_TO_PAGE(pmem_limit) >> PAGESHIFT) - 1; page_itr++) {
+    for (page_itr = free_page_head; page_itr < ((long)region_0_pt >> PAGESHIFT) - 1; page_itr++) {
         *(int *)((long)page_itr << PAGESHIFT) = page_itr + 1;
         num_free_pages++;
     }
@@ -385,16 +395,17 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
             if ((long)kernel_break >= VMEM_LIMIT) {
                 fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
+                // I don't think break is enough
                 break;
             }
             int pt_index = PAGE_TABLE_LEN - 1 - i;
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1)>>PAGESHIFT;
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1) >> PAGESHIFT;
             int pfn = free_page_deq(1, k_index, PROT_ALL, PROT_NONE);
             if (pfn < 0) {
                 fprintf(stderr, "cannot copy kernel stack\n");
                 break;
             }
-            memcpy((void*)((long)(UP_TO_PAGE(kernel_break + 1))), (void *)((long)(pt_index<<PAGESHIFT)), PAGESIZE);
+            memcpy((void*)((long)(UP_TO_PAGE(kernel_break + 1))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
             clear_pte(1, k_index);
 
             pp1->pt_virtual_addr[pt_index].valid = 1;
@@ -479,7 +490,7 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
     }
     sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
     fprintf(stderr, error_msg);
-
+    // TODO: Terminate Current Running Process
     // TODO: Context Switch to next process on ready queue
     free(reason);
     // free(error_msg);
