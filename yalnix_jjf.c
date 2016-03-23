@@ -45,7 +45,7 @@ void print_pt();
 void *v2p(void *vaddr);
 
 /* process initialization*/
-pcb *init_new_process(struct pte *pt_addr, int pid, int if_copy_kernel);
+pcb *init_new_process(void *pt_addr, int pid, int if_copy_kernel);
 
 /* Program Loading Method */
 void load_program_from_file(char *names, char **args);
@@ -245,7 +245,7 @@ void enable_VM() {
     vm_enabled = 1;
 }
 
-pcb *init_new_process(struct pte *pt_addr, int pid, int if_copy_kernel) {
+pcb *init_new_process(void *pt_addr, int pid, int if_copy_kernel) {
     pcb *new_process = malloc(sizeof(pcb));
     if (new_process == NULL) {
         fprintf(stderr, "Faliled malloc pcb for new program\n");
@@ -256,7 +256,7 @@ pcb *init_new_process(struct pte *pt_addr, int pid, int if_copy_kernel) {
         fprintf(stderr, "Failed malloc ctx for new program\n");
         return NULL;
     }
-    new_process->pt_virtual_addr = pt_addr;
+    new_process->pt_physical_addr = pt_addr;
     new_process->pid = pid;
     new_process->state = 0;
     new_process->time_to_switch = sys_time + 2;
@@ -329,23 +329,35 @@ void *allocate_physical_pt() {
     void *res;
     if (upper_pt_next != -1) {
         res = (void *)((long)(upper_pt_next*PAGESIZE + PAGESIZE/2));
-        set_pte(1, k_index, PROT_ALL, PROT_NONE, upper_pt_next);
-        upper_pt_next = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index + PAGESIZE / 2);
-        clear_pte(1, k_index);
+        upper_pt_next = read_from_pfn(res);
     }
     else if (lower_pt_next != -1) {
         res = (void *)((long)(lower_pt_next*PAGESIZE));
-        set_pte(1, k_index, PROT_ALL, PROT_NONE, lower_pt_next);
-        lower_pt_next = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index);
-        clear_pte(1, k_index);
+        lower_pt_next = read_from_pfn(res);
     }
     else {
-
+        if (free_page_head == -1) {
+            fprintf(stderr, "No more free pages\n");
+            return NULL;
+        }
+        res = (void *)((long)(free_page_head*PAGESIZE));
+        free_page_head = read_from_pfn(res);
+        free_physical_pt((void *)((long)(free_page_head*PAGESIZE + PAGESIZE/2)));
     }
     return res;
 }
 
-void free_physical_pt(void *physical_pt);
+void free_physical_pt(void *physical_pt) {
+    long pt_val = (long)physical_pt;
+    if (pt_val % PAGESIZE == 0) {
+        write_to_pfn(physical_pt, upper_pt_next);
+        upper_pt_next = pt_val>>PAGESHIFT;
+    }
+    else{
+        write_to_pfn(physical_pt, lower_pt_next);
+        lower_pt_next = pt_val>>PAGESHIFT;
+    }
+}
 
 int read_from_pfn(void *physical_addr) {
     if ((long)kernel_break >= VMEM_LIMIT) {
@@ -353,10 +365,22 @@ int read_from_pfn(void *physical_addr) {
         return -1;
     }
     int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1)>>PAGESHIFT;
-    
+    set_pte(1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr>>PAGESHIFT);
+    int res = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index + (long)physical_addr%PAGESIZE);
+    clear_pte(1, k_index);
+    return res;
 }
 
-void write_to_pfn(void *physical_addr, int towrite);
+void write_to_pfn(void *physical_addr, int towrite) {
+    if ((long)kernel_break >= VMEM_LIMIT) {
+        fprintf(stderr, "Kernel virtual space full, cannot write to physical address\n");
+        return -1;
+    }
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_REGION_SIZE + 1)>>PAGESHIFT;
+    set_pte(1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr>>PAGESHIFT);
+    *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index + (long)physical_addr%PAGESIZE) = towrite;
+    clear_pte(1, k_index);
+}
 
 void *v2p(void *vaddr) {
     struct pte *region = (long)vaddr<VMEM_REGION_SIZE?region_0_pt:region_1_pt;
@@ -397,15 +421,18 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
             memcpy((void*)((long)(UP_TO_PAGE(kernel_break + 1))), (void *)((long)(pt_index<<PAGESHIFT)), PAGESIZE);
             clear_pte(1, k_index);
 
-            pp1->pt_virtual_addr[pt_index].valid = 1;
-            pp1->pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
-            pp1->pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
-            pp1->pt_virtual_addr[pt_index].pfn = pfn;
+            set_pte(1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_physical_addr)>>PAGESHIFT);
+            struct pte *pp1_pt_virtual_addr = (long)(UP_TO_PAGE(kernel_break + 1)) + (long)(pp1->pt_physical_addr)%PAGESIZE;
+            pp1_pt_virtual_addr[pt_index].valid = 1;
+            pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
+            pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
+            pp1_pt_virtual_addr[pt_index].pfn = pfn;
+            clear_pte(1, k_index);
         }
         return pp1->ctx;
     }
     //TODO: update region_0_pt
-    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(v2p(pp2->pt_virtual_addr))));
+    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_physical_addr)));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
     region_0_pt = pp2->pt_virtual_addr;
     return pp2->ctx;
