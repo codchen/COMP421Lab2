@@ -9,6 +9,9 @@
 #include <comp421/yalnix.h>
 #include <comp421/hardware.h>
 
+#define REGION_0 0
+#define REGION_1 1
+
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
 
@@ -197,8 +200,8 @@ void init_initial_page_tables() {
     //region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
 
     // initial region 0 & 1 page tables are placed at the top page of region 1
-    region_0_pt = (struct pte *) DOWN_TO_PAGE(pmem_limit) - PAGESIZE;
-    region_1_pt = (struct pte *) region_0_pt + PAGE_TABLE_SIZE;
+    region_0_pt = (struct pte *) DOWN_TO_PAGE(pmem_limit) - 2 * PAGESIZE;
+    region_1_pt = (struct pte *) DOWN_TO_PAGE(pmem_limit) - PAGESIZE;;
 
     // setup initial ptes in region 1 page table and region 0 page table
     int page_itr;
@@ -222,10 +225,18 @@ void init_initial_page_tables() {
     }
 
     // init pte for two page tables
-    region_1_pt[page_itr - kernel_base_pfn].pfn = (long)region_0_pt >> PAGESHIFT;
-    region_1_pt[page_itr - kernel_base_pfn].uprot = 0;
-    region_1_pt[page_itr - kernel_base_pfn].kprot = PROT_READ | PROT_WRITE;
-    region_1_pt[page_itr - kernel_base_pfn].valid = 1;
+    int region_1_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 1;
+    int region_0_pt_idx = region_1_pt_idx - 1;
+
+    region_1_pt[region_0_pt_idx].pfn = (long)region_0_pt >> PAGESHIFT;
+    region_1_pt[region_0_pt_idx].uprot = 0;
+    region_1_pt[region_0_pt_idx].kprot = PROT_READ | PROT_WRITE;
+    region_1_pt[region_0_pt_idx].valid = 1;
+
+    region_1_pt[region_1_pt_idx].pfn = (long)region_1_pt >> PAGESHIFT;
+    region_1_pt[region_1_pt_idx].uprot = 0;
+    region_1_pt[region_1_pt_idx].kprot = PROT_READ | PROT_WRITE;
+    region_1_pt[region_1_pt_idx].valid = 1;
 
     WriteRegister(REG_PTR0, (RCS421RegVal)region_0_pt);
     WriteRegister(REG_PTR1, (RCS421RegVal)region_1_pt);
@@ -330,7 +341,7 @@ void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn) {
 }
 
 void clear_pte(int isregion1, int vpn) {
-    struct pte *region = isregion1?region_1_pt:region_0_pt;
+    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
     region[vpn].valid = 0;
     WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
 }
@@ -339,15 +350,15 @@ void *allocate_physical_pt() {
     void *res;
     if (upper_pt_next != -1) {
         res = (void *)((long)(upper_pt_next*PAGESIZE + PAGESIZE/2));
-        set_pte(1, k_index, PROT_ALL, PROT_NONE, upper_pt_next);
+        set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, upper_pt_next);
         upper_pt_next = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index + PAGESIZE / 2);
-        clear_pte(1, k_index);
+        clear_pte(REGION_1, k_index);
     }
     else if (lower_pt_next != -1) {
         res = (void *)((long)(lower_pt_next*PAGESIZE));
-        set_pte(1, k_index, PROT_ALL, PROT_NONE, lower_pt_next);
+        set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, lower_pt_next);
         lower_pt_next = *(int *)(VMEM_REGION_SIZE + PAGESIZE * k_index);
-        clear_pte(1, k_index);
+        clear_pte(REGION_1, k_index);
     }
     else {
 
@@ -390,7 +401,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     pcb *pp1 = (pcb *)p1;
     pcb *pp2 = (pcb *)p2;
     if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
-    if (pp2 == NULL) {                      //initialize SavedContext and copy kernel stack for a newly created (not running) process
+    if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
         int i;
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
             if ((long)kernel_break >= VMEM_LIMIT) {
@@ -406,7 +417,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
                 break;
             }
             memcpy((void*)((long)(UP_TO_PAGE(kernel_break + 1))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
-            clear_pte(1, k_index);
+            clear_pte(REGION_1, k_index);
 
             pp1->pt_virtual_addr[pt_index].valid = 1;
             pp1->pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
@@ -418,11 +429,20 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     //TODO: update region_0_pt
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(v2p(pp2->pt_virtual_addr))));
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+
     region_0_pt = pp2->pt_virtual_addr;
     return pp2->ctx;
 }
 
 /* Trap Handlers */
+void enter_kernel_mode(pcb *user_proc) {
+    int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 1;
+    region_1_pt[region_0_pt_idx].valid = 1;
+    region_1_pt[region_0_pt_idx].pfn = user_proc.pt_physical_addr;
+    region_0_pt = VMEM_1_LIMIT - 2 * PAGESIZE;
+}
+
+
 void trap_kernel_handler(ExceptionStackFrame *frame){
     printf("Trapped Kernel Handler...\n");
 }
