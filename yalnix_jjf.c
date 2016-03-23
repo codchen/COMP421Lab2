@@ -54,8 +54,8 @@ void *v2p(void *vaddr);
 pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);
 
 /* Program Loading Method */
-void load_program_from_file(struct pte *page_table, char *names, char **args);
-int LoadProgram(char *name, char **args, int *brk_pn, struct pte *page_table);   // from load template 
+void load_program_from_file(char *names, char **args);
+int LoadProgram(char *name, char **args, int *brk_pn);   // from load template 
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
@@ -66,8 +66,7 @@ void *allocate_physical_pt();
 void add_half_free_pt(void *physical_pt);
 int read_from_pfn(void *physical_addr);
 void write_to_pfn(void *physical_addr, int towrite);
-void validate_region_0_pt(pcb *proc);   // set valid bit of region_0_pt pte to 1
-void invalidate_region_0_pt();          // set valid bit of region_0_pt pte to 0
+void validate_region_0_pt();   // set valid bit of region_0_pt pte to 1
 
 /* Trap Handlers*/
 void trap_kernel_handler(ExceptionStackFrame *frame);
@@ -118,46 +117,34 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     kernel_break = orig_brk;
     pmem_limit = (void *)((long)PMEM_BASE + pmem_size);
     
-    printf("a\n");
     // initialize interrupt vector table
     init_interrupt_vector_table();
-
-    printf("b\n");
     // initialize region 1 & region 0 page table. they are located at the top of region 1
     init_initial_page_tables();
-
-    printf("c\n");
     // make a list of free physical pages
     init_free_page_list();
-
-    printf("d\n");
     // enable VM
     enable_VM();
 
     // new exceptionframe
     // init idle process
-    printf("e\n");
     char *idle_proc = "idle";
     void *new_region0 = allocate_physical_pt();
-    printf("q\n");
     if (new_region0 == NULL) {
         fprintf(stderr, "Error allocate free physical page table\n");
         return;
     }
     idle_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
-    printf("f\n");
     if (init_returned) {
         char **args = calloc(1, sizeof(char *));
         if (args == NULL) return;
         args[0] = NULL;
-        load_program_from_file((struct pte *)new_region0, idle_proc, args);
-        printf("g\n");
+        load_program_from_file(idle_proc, args);
         free(args);
     } else {
         init_returned = 1;
-        running_block = init_pcb((void *)region_0_pt, next_pid++, INIT_PROC);
-        load_program_from_file(region_0_pt, cmd_args[0], cmd_args);
-        printf("h\n");
+        running_block = init_pcb((void *)(DOWN_TO_PAGE(pmem_limit) - 2 * PAGESIZE), next_pid++, INIT_PROC);
+        load_program_from_file(cmd_args[0], cmd_args);
     }
 }
 
@@ -214,8 +201,8 @@ void init_initial_page_tables() {
     //region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
 
     // initial region 0 & 1 page tables are placed at the top page of region 1
-    region_0_pt = (struct pte *) DOWN_TO_PAGE(pmem_limit) - 2 * PAGESIZE;
-    region_1_pt = (struct pte *) DOWN_TO_PAGE(pmem_limit) - PAGESIZE;;
+    region_0_pt = (struct pte *)(DOWN_TO_PAGE(pmem_limit) - 2 * PAGESIZE);
+    region_1_pt = (struct pte *)(DOWN_TO_PAGE(pmem_limit) - PAGESIZE);
 
     // setup initial ptes in region 1 page table and region 0 page table
     int page_itr;
@@ -312,10 +299,13 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
 }
 
 /* Load a program from file, init the program with given page table */
-void load_program_from_file(struct pte *page_table, char *names, char **args) {
+void load_program_from_file(char *names, char **args) {
+    //map physical region 0 to virtual region 0
+    validate_region_0_pt();
+
     int *brk_pn = malloc(sizeof(int));
     *brk_pn = MEM_INVALID_PAGES;
-    int init_res = LoadProgram(names, args, brk_pn, page_table);
+    int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
         fprintf(stderr, "Load %s failed: %d\n", names, init_res);
         return;
@@ -351,7 +341,6 @@ int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
 
 /* Set pte of specified region with input parameters and flush corresponding TLB */
 void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn) {
-    printf("vpn = %d, isregion1 = %d\n", vpn, isregion1);
     struct pte *region = isregion1 ? region_1_pt:region_0_pt;
     region[vpn].valid = 1;
     region[vpn].kprot = kprot;
@@ -388,6 +377,12 @@ void *allocate_physical_pt() {
         // add half of the page to upper_next_pt_pfn
         add_half_free_pt((void *)((long)res + PAGE_TABLE_LEN));   
     }
+    //zero out page table
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(res) >> PAGESHIFT);
+    void *pt_virtual_addr = (void *)((long)(UP_TO_PAGE(kernel_break)) + (long)(res) % PAGESIZE);
+    memset(pt_virtual_addr,'\0', PAGE_TABLE_SIZE);
+    clear_pte(REGION_1, k_index);
     return res;
 }
 
@@ -430,14 +425,10 @@ void write_to_pfn(void *physical_addr, int towrite) {
     clear_pte(REGION_1, k_index);
 }
 
-void validate_region_0_pt(pcb *proc) {
+void validate_region_0_pt() {
     int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 2;
-    set_pte(REGION_1, region_0_pt_idx, PROT_ALL, PROT_NONE, proc->pt_phys_addr);
-}
-
-void invalidate_region_0_pt() {
-    int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 2;
-    region_1_pt[region_0_pt_idx].valid = 0;
+    set_pte(REGION_1, region_0_pt_idx, PROT_ALL, PROT_NONE, (long)(running_block->pt_phys_addr)>>PAGESHIFT);
+    region_0_pt = (struct pte *) (VMEM_1_LIMIT - 2 * PAGESIZE + (long)(running_block->pt_phys_addr)%PAGESIZE);
 }
 
 void *v2p(void *vaddr) {
@@ -462,9 +453,9 @@ void print_pt(){
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     pcb *pp1 = (pcb *)p1;
     pcb *pp2 = (pcb *)p2;
-    printf("Starts context switching...\n");
     if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
     if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
+        printf("Initializing process...\n");
         int i;
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
             if ((long)kernel_break >= VMEM_LIMIT) {
@@ -479,7 +470,6 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
                 fprintf(stderr, "cannot copy kernel stack\n");
                 break;
             }
-            printf("pt_index %d, KERNEL_STACK_BASE %d\n", pt_index, KERNEL_STACK_BASE);
             memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
             clear_pte(REGION_1, k_index);
 
@@ -493,17 +483,13 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         }
         return pp1->ctx;
     }
-
-    print_pt();
-    printf("lol\n");
+    printf("Starts context switching...\n");
     TracePrintf(0, "ContextSwitch: \n");
 
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
-    print_pt();
+    running_block = pp2;
+    validate_region_0_pt();
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-
-    // update 
-    validate_region_0_pt(pp2);
 
     return pp2->ctx;
 }
@@ -589,7 +575,7 @@ void trap_memory_handler(ExceptionStackFrame *frame){
     //     if (bytes[i] != 0) printf("%d:%02X ", i,(unsigned)bytes[i]);
     // }
     // printf("\n");
-    // printf("Trapped Memory...%p, %p, %p\n", frame->pc, frame->sp, frame->addr);
+    printf("Trapped Memory...%p, %p, %p\n", frame->pc, frame->sp, frame->addr);
 }
 void trap_math_handler(ExceptionStackFrame *frame){
     printf("Trapped Math...\n");
@@ -622,7 +608,7 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
  *  is no longer runnable, and this function returns -2 for errors
  *  in this case.
  */
-int LoadProgram(char *name, char **args, int* brk_pn, struct pte* page_table) {
+int LoadProgram(char *name, char **args, int* brk_pn) {
     int fd;
     int status;
     struct loadinfo li;
@@ -753,7 +739,7 @@ int LoadProgram(char *name, char **args, int* brk_pn, struct pte* page_table) {
     // >>>> memory page indicated by that PTE's pfn field.  Set all
     // >>>> of these PTEs to be no longer valid.
     for (i = MEM_INVALID_PAGES; i < KERNEL_STACK_BASE >> PAGESHIFT; i++) {
-        if (page_table[i].valid) {
+        if (region_0_pt[i].valid) {
             free_page_enq(0, i);
         }
     }
@@ -768,7 +754,7 @@ int LoadProgram(char *name, char **args, int* brk_pn, struct pte* page_table) {
     // >>>> Leave the first MEM_INVALID_PAGES number of PTEs in the
     // >>>> Region 0 page table unused (and thus invalid)
      for (i = 0; i < MEM_INVALID_PAGES; i++) {
-        page_table[i].valid = 0;
+        region_0_pt[i].valid = 0;
     }
     /* First, the text pages */
     // >>>> For the next text_npg number of PTEs in the Region 0
@@ -852,7 +838,7 @@ int LoadProgram(char *name, char **args, int* brk_pn, struct pte* page_table) {
     // >>>> For text_npg number of PTEs corresponding to the user text
     // >>>> pages, set each PTE's kprot to PROT_READ | PROT_EXEC.
     for (i = MEM_INVALID_PAGES; i < MEM_INVALID_PAGES + text_npg; i++) {
-        page_table[i].kprot = PROT_READ | PROT_EXEC;
+        region_0_pt[i].kprot = PROT_READ | PROT_EXEC;
     }
 
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
