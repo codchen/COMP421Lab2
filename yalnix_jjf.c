@@ -105,18 +105,28 @@ int upper_next_pt_pfn = -1, lower_next_pt_pfn = -1;     // upper & lower half em
 
 ExceptionStackFrame *EXCEPTION_FRAME_ADDR; //need further check!!!
 
-pcb *running_block; //when updated, update region_0_pt also!!!
-pcb *ready_head, *ready_tail;
-pcb *delay_head, *delay_tail;
+pcb *running_block = NULL; //when updated, update region_0_pt also!!!
+pcb *ready_head = NULL, *ready_tail = NULL;
+pcb *delay_head = NULL, *delay_tail = NULL; //Delay function should keep this list sorted
 pcb *tty_head[NUM_TERMINALS], *tty_tail[NUM_TERMINALS];
-pcb *idle_pcb;
+pcb *idle_pcb = NULL;
 int init_returned = 0;
 
 extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void *orig_brk, char **cmd_args) {
     EXCEPTION_FRAME_ADDR = frame;
     kernel_break = orig_brk;
     pmem_limit = (void *)((long)PMEM_BASE + pmem_size);
-    
+    tty_head = calloc(NUM_TERMINALS, sizeof(pcb *));
+    if (tty_head == NULL) {
+        fprintf(stderr, "Not enough memory for initialize kernel.\n");
+        return;
+    }
+    tty_tail = calloc(NUM_TERMINALS, sizeof(pcb *));
+    if (tty_tail == NULL) {
+        fprintf(stderr, "Not enough memory for initialize kernel.\n");
+        return;
+    }
+
     // initialize interrupt vector table
     init_interrupt_vector_table();
     // initialize region 1 & region 0 page table. they are located at the top of region 1
@@ -503,12 +513,12 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     printf("Trapped Clock...\n");
     sys_time++;
     printf("Current system time is %lu\n", sys_time);
+    
     if (running_block->time_to_switch == sys_time) {
         // get next block in ready Q (is it necessary to switch to idle when this is the only running block?)
         // context switch
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)idle_pcb);
     }
-
 }
 
 void trap_illegal_handler(ExceptionStackFrame *frame){
