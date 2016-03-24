@@ -14,7 +14,6 @@
 #define INIT_PROC 0
 #define NORMAL_PROC 1
 
-
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
 
@@ -46,16 +45,15 @@ void init_initial_page_tables();
 void init_free_page_list();
 void enable_VM();
 
-/* utils*/
+/* utils */
 void print_pt();
 void *v2p(void *vaddr);
 
-/* process initialization*/
-pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);
-
-/* Program Loading Method */
+/* Program/process Related Methods */
 void load_program_from_file(char *names, char **args);
 int LoadProgram(char *name, char **args, int *brk_pn);   // from load template 
+pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);    // initialize pcb
+pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail);
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
@@ -263,6 +261,50 @@ void enable_VM() {
     vm_enabled = 1;
 }
 
+/* Context switch methods */
+SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+    pcb *pp1 = (pcb *)p1;
+    pcb *pp2 = (pcb *)p2;
+    if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
+    if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
+        printf("Initializing process...\n");
+        int i;
+        for (i = 0; i < KERNEL_STACK_PAGES; i++) {
+            if ((long)kernel_break >= VMEM_LIMIT) {
+                fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
+                // TODO: I don't think break is enough, maybe return error?
+                break;
+            }
+            int pt_index = PAGE_TABLE_LEN - 1 - i;
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
+            if (pfn < 0) {
+                fprintf(stderr, "cannot copy kernel stack\n");
+                break;
+            }
+            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
+            clear_pte(REGION_1, k_index);
+
+            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_phys_addr) >> PAGESHIFT);
+            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
+            pp1_pt_virtual_addr[pt_index].valid = 1;
+            pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
+            pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
+            pp1_pt_virtual_addr[pt_index].pfn = pfn;
+            clear_pte(REGION_1, k_index);
+        }
+        return pp1->ctx;
+    }
+    printf("Starts context switching...\n");
+    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
+    running_block = pp2;
+    validate_region_0_pt();
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+
+    return pp2->ctx;
+}
+
+/*************************** Process/program Related Methods ***************************/
 /* Initialize a new pcb */
 pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
     pcb *new_process = malloc(sizeof(pcb));
@@ -310,47 +352,19 @@ void load_program_from_file(char *names, char **args) {
     printf("Successfully load %s into kernel\n", names);
 }
 
-/* Context switch methods */
-SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
-    pcb *pp1 = (pcb *)p1;
-    pcb *pp2 = (pcb *)p2;
-    if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
-    if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
-        printf("Initializing process...\n");
-        int i;
-        for (i = 0; i < KERNEL_STACK_PAGES; i++) {
-            if ((long)kernel_break >= VMEM_LIMIT) {
-                fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
-                // TODO: I don't think break is enough, maybe return error?
-                break;
-            }
-            int pt_index = PAGE_TABLE_LEN - 1 - i;
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
-            if (pfn < 0) {
-                fprintf(stderr, "cannot copy kernel stack\n");
-                break;
-            }
-            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
-            clear_pte(REGION_1, k_index);
+/* Given the head and tail of a pcb queue (ready or delay), return the next available process pcb */
+pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail) {
+    if (q_head == NULL)
+        return NULL;
 
-            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_phys_addr) >> PAGESHIFT);
-            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
-            pp1_pt_virtual_addr[pt_index].valid = 1;
-            pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
-            pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
-            pp1_pt_virtual_addr[pt_index].pfn = pfn;
-            clear_pte(REGION_1, k_index);
-        }
-        return pp1->ctx;
+    pcb *to_return = q_head;
+    if (q_head == q_tail) {
+        q_tail = NULL;
+        q_head = NULL;
+        return to_return;
     }
-    printf("Starts context switching...\n");
-    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
-    running_block = pp2;
-    validate_region_0_pt();
-    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-
-    return pp2->ctx;
+    q_head = q_head->next;
+    return to_return;
 }
 
 /************************ Trap Handlers *************************/
