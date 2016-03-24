@@ -660,28 +660,27 @@ void trap_tty_receive_handler(ExceptionStackFrame *frame){
         return;
     }
     int len = TtyReceive(tty, buf, TERMINAL_MAX_LINE);
-    if (len > 0) {
-        line *newline = malloc(sizeof(line));
-        if (newline == NULL) {
-            fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
-            return;
-        }
-        newline->buf = malloc(sizeof(char) * len);
-        if (newline->buf == NULL) {
-            fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
-            return;
-        }
-        memcpy(newline->buf, buf, len);
-        free(buf);
-        newline->cur = 0;
-        newline->len = len;
-        if (line_head == NULL) line_head = newline;
-        else line_tail->next = newline;
-        line_tail = newline;
-
-        if (tty_head[tty] != NULL)
-            add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty));
+    
+    line *newline = malloc(sizeof(line));
+    if (newline == NULL) {
+        fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
+        return;
     }
+    newline->buf = malloc(sizeof(char) * len);
+    if (newline->buf == NULL) {
+        fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
+        return;
+    }
+    memcpy(newline->buf, buf, len);
+    free(buf);
+    newline->cur = 0;
+    newline->len = len;
+    if (line_head == NULL) line_head = newline;
+    else line_tail->next = newline;
+    line_tail = newline;
+
+    if (tty_head[tty] != NULL)
+        add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty));
 }
 
 void trap_tty_transmit_handler(ExceptionStackFrame *frame){
