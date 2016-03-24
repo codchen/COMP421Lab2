@@ -377,6 +377,13 @@ pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail) {
     return to_return;
 }
 
+void terminate_process(int status) {
+    // let parent know the process is being terminated
+    if (running_block->parent != NULL) {
+        cei *info = 
+    }
+}
+
 /************************ Trap Handlers *************************/
 void trap_kernel_handler(ExceptionStackFrame *frame){
     printf("Trapped Kernel Handler...\n");
