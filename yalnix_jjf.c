@@ -14,7 +14,6 @@
 #define INIT_PROC 0
 #define NORMAL_PROC 1
 
-
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
 
@@ -46,16 +45,15 @@ void init_initial_page_tables();
 void init_free_page_list();
 void enable_VM();
 
-/* utils*/
+/* utils */
 void print_pt();
 void *v2p(void *vaddr);
 
-/* process initialization*/
-pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);
-
-/* Program Loading Method */
+/* Program/process Related Methods */
 void load_program_from_file(char *names, char **args);
 int LoadProgram(char *name, char **args, int *brk_pn);   // from load template 
+pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);    // initialize pcb
+pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail);
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
@@ -174,7 +172,6 @@ extern int SetKernelBrk(void *addr) {
             printf("case 1\n");
             for (i = (UP_TO_PAGE(kernel_break) - VMEM_1_BASE) >> PAGESHIFT; 
                     i <= (DOWN_TO_PAGE(addr) - VMEM_1_BASE) >> PAGESHIFT; i++) {
-                printf("%d\n", i);
                 if (free_page_deq(REGION_1, i, PROT_READ | PROT_WRITE, 0) < 0) {
                     return -1;
                 }
@@ -183,7 +180,6 @@ extern int SetKernelBrk(void *addr) {
         else {
             printf("case 2\n");
             for (i = (DOWN_TO_PAGE(kernel_break) - VMEM_REGION_SIZE) >> PAGESHIFT; i >= (UP_TO_PAGE(addr) - VMEM_REGION_SIZE) >> PAGESHIFT; i--) {
-                printf("%d\n", i); 
                 free_page_enq(REGION_1, i);
             }
         }
@@ -206,10 +202,6 @@ void init_interrupt_vector_table() {
 }
 
 void init_initial_page_tables() {
-    // malloc page tables in kernel heap
-    //region_0_pt = (struct pte *) calloc(2, PAGE_TABLE_SIZE);
-    //region_1_pt = (struct pte *)((long)region_0_pt + PAGE_TABLE_SIZE);
-
     // initial region 0 & 1 page tables are placed at the top page of region 1
     region_0_pt = (struct pte *)(DOWN_TO_PAGE(pmem_limit) - 2 * PAGESIZE);
     region_1_pt = (struct pte *)(DOWN_TO_PAGE(pmem_limit) - PAGESIZE);
@@ -279,6 +271,50 @@ void enable_VM() {
     vm_enabled = 1;
 }
 
+/* Context switch methods */
+SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
+    pcb *pp1 = (pcb *)p1;
+    pcb *pp2 = (pcb *)p2;
+    if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
+    if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
+        printf("Initializing process...\n");
+        int i;
+        for (i = 0; i < KERNEL_STACK_PAGES; i++) {
+            if ((long)kernel_break >= VMEM_LIMIT) {
+                fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
+                // TODO: I don't think break is enough, maybe return error?
+                break;
+            }
+            int pt_index = PAGE_TABLE_LEN - 1 - i;
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
+            if (pfn < 0) {
+                fprintf(stderr, "cannot copy kernel stack\n");
+                break;
+            }
+            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
+            clear_pte(REGION_1, k_index);
+
+            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_phys_addr) >> PAGESHIFT);
+            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
+            pp1_pt_virtual_addr[pt_index].valid = 1;
+            pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
+            pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
+            pp1_pt_virtual_addr[pt_index].pfn = pfn;
+            clear_pte(REGION_1, k_index);
+        }
+        return pp1->ctx;
+    }
+    printf("Starts context switching...\n");
+    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
+    running_block = pp2;
+    validate_region_0_pt();
+    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
+
+    return pp2->ctx;
+}
+
+/*************************** Process/program Related Methods ***************************/
 /* Initialize a new pcb */
 pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
     pcb *new_process = malloc(sizeof(pcb));
@@ -326,185 +362,22 @@ void load_program_from_file(char *names, char **args) {
     printf("Successfully load %s into kernel\n", names);
 }
 
-/* Memory Management Util Methods */
-/* Given a virtual page number, add its corresponding physical page to free page list */
-void free_page_enq(int isregion1, int vpn) {
-    struct pte *region = isregion1?region_1_pt:region_0_pt;
-    *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
-    free_page_head = region[vpn].pfn;
-    clear_pte(isregion1, vpn);
-    num_free_pages++;
-}
+/* Given the head and tail of a pcb queue (ready or delay), return the next available process pcb */
+pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail) {
+    if (q_head == NULL)
+        return NULL;
 
-/* Given a virtual page number, assign a physical page to its corresponding pte entry */
-int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
-    if (num_free_pages == 0) {
-        fprintf(stderr, "No enough physical page\n");
-        return -1;
+    pcb *to_return = q_head;
+    if (q_head == q_tail) {
+        q_tail = NULL;
+        q_head = NULL;
+        return to_return;
     }
-    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
-    set_pte(isregion1, vpn, kprot, uprot, free_page_head);
-    free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
-    num_free_pages--;
-    return region[vpn].pfn;
+    q_head = q_head->next;
+    return to_return;
 }
 
-/* Set pte of specified region with input parameters and flush corresponding TLB */
-void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn) {
-    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
-    region[vpn].valid = 1;
-    region[vpn].kprot = kprot;
-    region[vpn].uprot = uprot;
-    region[vpn].pfn = pfn;
-    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
-}
-
-void clear_pte(int isregion1, int vpn) {
-    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
-    region[vpn].valid = 0;
-    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
-}
-
-/* Return a new physical page table */
-void *allocate_physical_pt() {
-    void *res;
-    if (upper_next_pt_pfn != -1) {
-        res = (void *)((long)(upper_next_pt_pfn << PAGESHIFT) + PAGE_TABLE_LEN);
-        upper_next_pt_pfn = read_from_pfn(res);
-    } 
-    else if (lower_next_pt_pfn != -1) {
-        res = (void *)((long)(lower_next_pt_pfn<< PAGESHIFT));
-        lower_next_pt_pfn = read_from_pfn(res);
-    }
-    else {
-        if (free_page_head == -1) {
-            fprintf(stderr, "No more free pages\n");
-            // TODO: again, here should cause some kernel trap indicating this error
-            return NULL;
-        }
-        res = (void *)((long)(free_page_head << PAGESHIFT));
-        free_page_head = read_from_pfn(res);
-        // add half of the page to upper_next_pt_pfn
-        add_half_free_pt((void *)((long)res + PAGE_TABLE_LEN));   
-    }
-    //zero out page table
-    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(res) >> PAGESHIFT);
-    void *pt_virtual_addr = (void *)((long)(UP_TO_PAGE(kernel_break)) + (long)(res) % PAGESIZE);
-    memset(pt_virtual_addr,'\0', PAGE_TABLE_SIZE);
-    clear_pte(REGION_1, k_index);
-    return res;
-}
-
-/* Add half free page to upper_next_pt_pfn or lower_next_pt_pfn*/
-void add_half_free_pt(void *physical_pt) {
-    long pt_val = (long)physical_pt;
-    if (pt_val % PAGESIZE == 0) {
-        write_to_pfn(physical_pt, upper_next_pt_pfn);
-        upper_next_pt_pfn = pt_val >> PAGESHIFT;
-    } else {
-        write_to_pfn(physical_pt, lower_next_pt_pfn);
-        lower_next_pt_pfn = pt_val >> PAGESHIFT;
-    }
-}
-
-/* Read next available free pfn/half_pt_pfn of passed in physical_addr */
-int read_from_pfn(void *physical_addr) {
-    if ((long)kernel_break >= VMEM_LIMIT) {
-        fprintf(stderr, "Kernel virtual space full, cannot read from physical address\n");
-        // TODO: ERROR CHECK
-        return -1;
-    }
-    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-
-    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
-    int res = *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE);
-    clear_pte(REGION_1, k_index);   // why clear?
-    return res;
-}
-
-/* */
-void write_to_pfn(void *physical_addr, int towrite) {
-    if ((long)kernel_break >= VMEM_LIMIT) {
-        fprintf(stderr, "Kernel virtual space full, cannot write to physical address\n");
-        return;
-    }
-    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
-    *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE) = towrite;
-    clear_pte(REGION_1, k_index);
-}
-
-void validate_region_0_pt() {
-    int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 2;
-    set_pte(REGION_1, region_0_pt_idx, PROT_ALL, PROT_NONE, (long)(running_block->pt_phys_addr)>>PAGESHIFT);
-    region_0_pt = (struct pte *) (VMEM_1_LIMIT - 2 * PAGESIZE + (long)(running_block->pt_phys_addr)%PAGESIZE);
-}
-
-void *v2p(void *vaddr) {
-    struct pte *region = (long)vaddr<VMEM_REGION_SIZE?region_0_pt:region_1_pt;
-    if ((long)vaddr >= VMEM_REGION_SIZE) vaddr -= VMEM_REGION_SIZE;
-    return (void *)((long)((region[(long)vaddr>>PAGESHIFT].pfn<<PAGESHIFT)+(long)vaddr%PAGESIZE));
-}
-
-void print_pt(){
-    int i;
-    for (i = 0; i < PAGE_TABLE_LEN; i++) {
-        if (region_0_pt[i].valid) {
-            printf("0:%d->%d\n", i, region_0_pt[i].pfn);
-        }
-        if (region_1_pt[i].valid) {
-            printf("1:%d->%d\n", i, region_1_pt[i].pfn);
-        }
-    }
-}
-
-/* Context switch methods */
-SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
-    pcb *pp1 = (pcb *)p1;
-    pcb *pp2 = (pcb *)p2;
-    if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
-    if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
-        printf("Initializing process...\n");
-        int i;
-        for (i = 0; i < KERNEL_STACK_PAGES; i++) {
-            if ((long)kernel_break >= VMEM_LIMIT) {
-                fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
-                // I don't think break is enough
-                break;
-            }
-            int pt_index = PAGE_TABLE_LEN - 1 - i;
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
-            if (pfn < 0) {
-                fprintf(stderr, "cannot copy kernel stack\n");
-                break;
-            }
-            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
-            clear_pte(REGION_1, k_index);
-
-            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_phys_addr) >> PAGESHIFT);
-            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
-            pp1_pt_virtual_addr[pt_index].valid = 1;
-            pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
-            pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
-            pp1_pt_virtual_addr[pt_index].pfn = pfn;
-            clear_pte(REGION_1, k_index);
-        }
-        return pp1->ctx;
-    }
-    printf("Starts context switching...\n");
-    TracePrintf(0, "ContextSwitch: \n");
-
-    WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
-    running_block = pp2;
-    validate_region_0_pt();
-    WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-
-    return pp2->ctx;
-}
-
-/* Trap Handlers */
+/************************ Trap Handlers *************************/
 void trap_kernel_handler(ExceptionStackFrame *frame){
     printf("Trapped Kernel Handler...\n");
 }
@@ -513,7 +386,6 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     printf("Trapped Clock...\n");
     sys_time++;
     printf("Current system time is %lu\n", sys_time);
-    
     if (running_block->time_to_switch == sys_time) {
         // get next block in ready Q (is it necessary to switch to idle when this is the only running block?)
         // context switch
@@ -579,22 +451,201 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
 
 }
 void trap_memory_handler(ExceptionStackFrame *frame){
-    // unsigned char *bytes = (unsigned char *)((long)16<<PAGESHIFT);
-    // int i;
-    // for (i = 0; i < PAGESIZE; i++) {
-    //     if (bytes[i] != 0) printf("%d:%02X ", i,(unsigned)bytes[i]);
-    // }
-    // printf("\n");
     printf("Trapped Memory...%p, %p, %p\n", frame->pc, frame->sp, frame->addr);
 }
+
 void trap_math_handler(ExceptionStackFrame *frame){
     printf("Trapped Math...\n");
+    int code = frame->code;
+    char error_msg[255];
+    char *reason;
+        switch(code) {
+        case TRAP_ILLEGAL_ILLOPC:
+            reason = "Illegal Opcode";
+            break;
+        case TRAP_ILLEGAL_ILLOPN:
+            reason = "Illegal Operand";
+            break;
+        case TRAP_ILLEGAL_ILLADR:
+            reason = "Illegal Addressing Mode";
+            break;
+        case TRAP_ILLEGAL_ILLTRP:
+            reason = "Illegal Software Trap";
+            break;
+        case TRAP_ILLEGAL_PRVOPC:
+            reason = "Privileged Opcode";
+            break;
+        case TRAP_ILLEGAL_PRVREG:  
+            reason = "Privileged Register";
+            break;
+        case TRAP_ILLEGAL_COPROC:  
+            reason = "Coprocessor Error";
+            break;
+        case TRAP_ILLEGAL_BADSTK:
+            reason = "Bad Stack";
+            break;
+        case TRAP_ILLEGAL_KERNELI:  
+            reason = "Receiving SIGILL from LINUX Kernel";
+            break;
+        case TRAP_ILLEGAL_USERIB:    
+            reason = "Receiving SIGILL or SIGBUS from User";
+            break;
+        case TRAP_ILLEGAL_ADRALN:
+            reason = "Invalid Address Alignment";
+            break;
+        case TRAP_ILLEGAL_ADRERR:
+            reason = "Non-existant Physical Address";
+            break;
+        case TRAP_ILLEGAL_OBJERR:
+            reason = "Object-specific HW Error";
+            break;
+        case TRAP_ILLEGAL_KERNELB:
+            reason = "Receiving SIGBUS from LINUX Kernel";
+            break;
+    }
+
 }
 void trap_tty_receive_handler(ExceptionStackFrame *frame){
     printf("Trapped Tty Receive...\n");
 }
 void trap_tty_transmit_handler(ExceptionStackFrame *frame){
     printf("Trapped Tty Transmit...\n");
+}
+
+/************************************* Memory Management Util Methods **********************************************/
+/* Given a virtual page number, add its corresponding physical page to free page list */
+void free_page_enq(int isregion1, int vpn) {
+    struct pte *region = isregion1?region_1_pt:region_0_pt;
+    *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
+    free_page_head = region[vpn].pfn;
+    clear_pte(isregion1, vpn);
+    num_free_pages++;
+}
+
+/* Given a virtual page number, assign a physical page to its corresponding pte entry */
+int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
+    if (num_free_pages == 0) {
+        fprintf(stderr, "No enough physical page\n");
+        return -1;
+    }
+    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
+    set_pte(isregion1, vpn, kprot, uprot, free_page_head);
+    free_page_head = *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
+    num_free_pages--;
+    return region[vpn].pfn;
+}
+
+/* Set pte of specified region with input parameters and flush corresponding TLB */
+void set_pte(int isregion1, int vpn, int kprot, int uprot, int pfn) {
+    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
+    region[vpn].valid = 1;
+    region[vpn].kprot = kprot;
+    region[vpn].uprot = uprot;
+    region[vpn].pfn = pfn;
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
+}
+
+/* Invalidate pte of specified region */
+void clear_pte(int isregion1, int vpn) {
+    struct pte *region = isregion1 ? region_1_pt:region_0_pt;
+    region[vpn].valid = 0;
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
+}
+
+/* Return a new physical page table */
+void *allocate_physical_pt() {
+    void *res;
+    if (upper_next_pt_pfn != -1) {
+        res = (void *)((long)(upper_next_pt_pfn << PAGESHIFT) + PAGE_TABLE_LEN);
+        upper_next_pt_pfn = read_from_pfn(res);
+    } 
+    else if (lower_next_pt_pfn != -1) {
+        res = (void *)((long)(lower_next_pt_pfn<< PAGESHIFT));
+        lower_next_pt_pfn = read_from_pfn(res);
+    }
+    else {
+        if (free_page_head == -1) {
+            fprintf(stderr, "No more free pages\n");
+            // TODO: again, here should cause some kernel trap indicating this error
+            return NULL;
+        }
+        res = (void *)((long)(free_page_head << PAGESHIFT));
+        free_page_head = read_from_pfn(res);
+        // add half of the page to upper_next_pt_pfn
+        add_half_free_pt((void *)((long)res + PAGE_TABLE_LEN));   
+    }
+    //zero out page table
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(res) >> PAGESHIFT);
+    void *pt_virtual_addr = (void *)((long)(UP_TO_PAGE(kernel_break)) + (long)(res) % PAGESIZE);
+    memset(pt_virtual_addr,'\0', PAGE_TABLE_SIZE);
+    clear_pte(REGION_1, k_index);
+    return res;
+}
+
+/* Add half free page to upper_next_pt_pfn or lower_next_pt_pfn*/
+void add_half_free_pt(void *physical_pt) {
+    long pt_val = (long)physical_pt;
+    if (pt_val % PAGESIZE == 0) {
+        write_to_pfn(physical_pt, upper_next_pt_pfn);
+        upper_next_pt_pfn = pt_val >> PAGESHIFT;
+    } else {
+        write_to_pfn(physical_pt, lower_next_pt_pfn);
+        lower_next_pt_pfn = pt_val >> PAGESHIFT;
+    }
+}
+
+/* Read next available free pfn/half_pt_pfn of passed in physical_addr */
+int read_from_pfn(void *physical_addr) {
+    if ((long)kernel_break >= VMEM_LIMIT) {
+        fprintf(stderr, "Kernel virtual space full, cannot read from physical address\n");
+        // TODO: ERROR CHECK
+        return -1;
+    }
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
+    int res = *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE);
+    clear_pte(REGION_1, k_index);
+    return res;
+}
+
+/* Write next available free pfn/half_pt_pfn into passed in physical_addr */
+void write_to_pfn(void *physical_addr, int towrite) {
+    if ((long)kernel_break >= VMEM_LIMIT) {
+        fprintf(stderr, "Kernel virtual space full, cannot write to physical address\n");
+        return;
+    }
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
+    *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE) = towrite;
+    clear_pte(REGION_1, k_index);
+}
+
+void validate_region_0_pt() {
+    int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 2;
+    set_pte(REGION_1, region_0_pt_idx, PROT_ALL, PROT_NONE, (long)(running_block->pt_phys_addr)>>PAGESHIFT);
+    region_0_pt = (struct pte *) (VMEM_1_LIMIT - 2 * PAGESIZE + (long)(running_block->pt_phys_addr)%PAGESIZE);
+}
+
+/* Given a virtual address, return its physical address*/
+void *v2p(void *vaddr) {
+    struct pte *region = (long)vadd r < VMEM_1_BASE ? region_0_pt:region_1_pt;
+    if ((long)vaddr >= VMEM_1_BASE) vaddr -= VMEM_1_BASE;
+    return (void *)((long)((region[(long)vaddr >> PAGESHIFT].pfn << PAGESHIFT) + (long)vaddr % PAGESIZE));
+}
+
+/* Print valid entries of region_0_pt and region_1_pt */
+void print_pt(){
+    int i;
+    for (i = 0; i < PAGE_TABLE_LEN; i++) {
+        if (region_0_pt[i].valid) {
+            printf("0:%d->%d\n", i, region_0_pt[i].pfn);
+        }
+        if (region_1_pt[i].valid) {
+            printf("1:%d->%d\n", i, region_1_pt[i].pfn);
+        }
+    }
 }
 
 /* Load Program */
