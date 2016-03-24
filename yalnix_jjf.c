@@ -418,7 +418,7 @@ pcb *get_next_proc_on_queue(int whichQ) {
         pcb *to_return = ready_head;
         if (ready_head == ready_tail) ready_head = ready_tail = NULL;
         else ready_head = ready_head->next;
-        return to_return;
+        return (to_return == NULL)?idle:to_return;
     }
     else {
         pcb *to_return = delay_head;
@@ -521,8 +521,40 @@ void terminate_process(int status) {
 }
 
 /************************ Trap Handlers *************************/
+
+//may need to terminate malfunctional process in this handler
 void trap_kernel_handler(ExceptionStackFrame *frame){
     printf("Trapped Kernel Handler...\n");
+    int code = frame->code;
+    switch(code) {
+        case YALNIX_FORK:
+            frame->regs[0] = (unsigned long)Fork();
+            break;
+        case YALNIX_EXEC:
+            frame->regs[0] = (unsigned long)Exec((char *)(frame->regs[1]), (char **)(frame->regs[2]));
+            break;
+        case YALNIX_EXIT:
+            Exit((int)(frame->regs[1]));
+            break;
+        case YALNIX_WAIT:
+            frame->regs[0] = (unsigned long)Wait((int *)(frame->regs[1]));
+            break;
+        case YALNIX_GETPID:
+            frame->regs[0] = (unsigned long)GetPid();
+            break;
+        case YALNIX_BRK:
+            frame->regs[0] = (unsigned long)Brk((void *)(frame->regs[1]));
+            break;
+        case YALNIX_DELAY:
+            frame->regs[0] = (unsigned long)Delay((int)(frame->regs[1]));
+            break;
+        case YALNIX_TTY_READ:
+            frame->regs[0] = (unsigned long)TtyRead((int)(frame->regs[1]), (void *)(frame->regs[2]), (int)(frame->regs[3]));
+            break;
+        case YALNIX_TTY_WRITE:
+            frame->regs[0] = (unsigned long)TtyWrite((int)(frame->regs[1]), (void *)(frame->regs[2]), (int)(frame->regs[3]));
+            break;
+    }
 }
 
 void trap_clock_handler(ExceptionStackFrame *frame){
@@ -592,7 +624,6 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
     free(reason);
     terminate_process(ERROR);
     pcb *next_proc = get_next_proc_on_queue(READY_Q);
-    next_proc = (next_proc == NULL ? idle_proc : next_proc);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc));
 
 }
@@ -693,6 +724,44 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
         if (tty_head[tty + NUM_TERMINALS] != NULL)
             add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty + NUM_TERMINALS));
     }
+}
+
+/************************ Kernel calls *************************/
+
+extern int TtyRead(int tty_id, void *buf, int len) {
+    if (len < 0) return ERROR;
+    if (len == 0) return 0;
+    if (line_head == NULL) {
+        add_next_proc_on_queue(tty_id, running_block);
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+    }
+    if (len >= line_head->len - line_head->cur) {
+        int res = line_head->len - line_head->cur
+        memcpy(buf, (void *)((long)line_head->buf + line_head->cur), res);
+        line_head = line_head->next;
+        if (line_head == NULL) line_tail = NULL;
+        return res;
+    }
+    else {
+        memcpy(buf, (void *)((long)line_head->buf + line_head->cur), len);
+        line_head->cur = line_head->cur + len;
+        if (tty_head[tty_id] != NULL)
+            add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty_id));
+        return len;
+    }
+}
+
+extern int TtyWrite(int tty_id, void *buf, int len) {
+    if (len < 0 || len > TERMINAL_MAX_LINE) return ERROR;
+    if (len == 0) return 0;
+    if (tty_transmiting[tty_id] != NULL) {
+        add_next_proc_on_queue(tty_id + NUM_TERMINALS, running_block);
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+    }
+    tty_transmiting[tty_id] = running_block;
+    TtyTransmit(tty_id, buf, len);
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+    return len;
 }
 
 /************************************* Memory Management Util Methods **********************************************/
