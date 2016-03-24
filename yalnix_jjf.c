@@ -13,10 +13,14 @@
 #define REGION_1 1
 #define INIT_PROC 0
 #define NORMAL_PROC 1
+
 #define PCB_TERMINATED  -1
 #define PCB_RUNNING 0
 #define PCB_READY 1
 #define PCB_WAITBLOC 2
+
+#define READY_Q NUM_TERMINALS
+#define DELAY_Q READY_Q + 1
 
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
@@ -36,6 +40,8 @@ typedef struct pcb {
     int nchild;
     struct pcb *next;
     struct pcb *parent;
+    struct pcb *child;
+    struct pcb *sibling;
     cei *exited_children_head;
     cei *exited_children_tail;
     //TODO: user brk
@@ -57,7 +63,8 @@ void *v2p(void *vaddr);
 void load_program_from_file(char *names, char **args);
 int LoadProgram(char *name, char **args, int *brk_pn);   // from load template 
 pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);    // initialize pcb
-pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail);
+pcb *get_next_proc_on_queue(int whichQ);
+void add_next_proc_on_queue(int whichQ, pcb *toadd);
 
 /* Memory Management Util Methods */
 void free_page_enq(int isregion1, int vpn); // Add a physical page corresponding to vpn to free page list
@@ -325,6 +332,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     printf("Starts context switching...\n");
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
     running_block = pp2;
+    running_block->time_to_switch = sys_time + 2;
     validate_region_0_pt();
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
 
@@ -350,6 +358,8 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
     new_process->time_to_switch = sys_time + 2;
     new_process->next = NULL;
     new_process->parent = NULL;
+    new_process->child = NULL;
+    new_process->sibling = NULL;
     new_process->exited_children_head = NULL;
     new_process->exited_children_tail = NULL;
     new_process->nchild = 0;
@@ -380,18 +390,67 @@ void load_program_from_file(char *names, char **args) {
 }
 
 /* Given the head and tail of a pcb queue (ready or delay), return the next available process pcb */
-pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail) {
-    if (q_head == NULL)
-        return NULL;
-
-    pcb *to_return = q_head;
-    if (q_head == q_tail) {
-        q_tail = NULL;
-        q_head = NULL;
+pcb *get_next_proc_on_queue(int whichQ) {
+    if (whichQ < 0 || whichQ > DELAY_Q) return NULL;
+    if (whichQ < READY_Q) {
+        pcb *to_return = tty_head[whichQ];
+        if (tty_head[whichQ] == tty_tail[whichQ]) tty_head[whichQ] = tty_tail[whichQ] = NULL;
+        else tty_head[whichQ] = tty_head[whichQ]->next;
         return to_return;
     }
-    q_head = q_head->next;
-    return to_return;
+    else if (whichQ == READY_Q) {
+        pcb *to_return = ready_head;
+        if (ready_head == ready_tail) ready_head = ready_tail = NULL;
+        else ready_head = ready_head->next;
+        return to_return;
+    }
+    else {
+        pcb *to_return = delay_head;
+        if (delay_head == delay_tail) delay_head = delay_tail = NULL;
+        else delay_head = delay_head->next;
+        return to_return;
+    }
+}
+
+void add_next_proc_on_queue(int whichQ, pcb *toadd) {
+    if (whichQ < 0 || whichQ > DELAY_Q) return NULL;
+    toadd->next = NULL;
+    if (whichQ < READY_Q) {
+        if (tty_head[whichQ] == NULL) tty_head[whichQ] = tty_tail[whichQ] = toadd;
+        else tty_tail[whichQ]->next = toadd;
+    }
+    else if (whichQ == READY_Q) {
+        if (ready_head == NULL) ready_head = ready_tail = toadd;
+        else ready_tail->next = toadd;
+    }
+    else {
+        if (delay_head == NULL) delay_head = delay_tail = toadd;
+        else {
+            pcb *current = delay_head;
+            pcb *next = delay_head->next;
+            while (current != NULL) {
+                if (toadd->time_to_switch < current->time_to_switch) {
+                    toadd->next = current;
+                    delay_head = toadd;
+                    return;
+                }
+                else if (next == NULL) {
+                    current->next = toadd;
+                    delay_tail = toadd;
+                    return;
+                }
+                else if (toadd->time_to_switch < next->time_to_switch) {
+                    current->next = toadd;
+                    toadd->next = next;
+                    return;
+                }
+                else {
+                    current = next;
+                    next = next->next;
+                }
+            }
+        }
+    }
 }
 
 /* Enqueue a new child exit info */
@@ -452,10 +511,14 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     printf("Trapped Clock...\n");
     sys_time++;
     printf("Current system time is %lu\n", sys_time);
-    if (running_block->time_to_switch == sys_time) {
-        // get next block in ready Q (is it necessary to switch to idle when this is the only running block?)
-        // context switch
-        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)idle_pcb);
+    if (delay_head != NULL && delay_head->time_to_switch == sys_time) {
+        pcb *ready = get_next_proc_on_queue(DELAY_Q);
+        add_next_proc_on_queue(READY_Q, ready);
+    }
+    if (running_block == idle || running_block->time_to_switch == sys_time) {
+        if (ready_head != NULL) {
+            ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+        }
     }
 }
 
