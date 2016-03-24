@@ -589,10 +589,11 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
     }
     sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
     fprintf(stderr, error_msg);
-    // TODO: Terminate Current Running Process
-    // TODO: Context Switch to next process on ready queue
     free(reason);
-    // free(error_msg);
+    terminate_process(ERROR);
+    pcb *next_proc = get_next_proc_on_queue(READY_Q);
+    next_proc = (next_proc == NULL ? idle_proc : next_proc);
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc));
 
 }
 void trap_memory_handler(ExceptionStackFrame *frame){
