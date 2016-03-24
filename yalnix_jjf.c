@@ -13,6 +13,10 @@
 #define REGION_1 1
 #define INIT_PROC 0
 #define NORMAL_PROC 1
+#define PCB_TERMINATED  -1
+#define PCB_RUNNING 0
+#define PCB_READY 1
+#define PCB_WAITBLOC 2
 
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
@@ -27,7 +31,7 @@ typedef struct pcb {
     SavedContext *ctx;
     void *pt_phys_addr;
     int pid;
-    char state; //RUNNING is 0, READY is 1, WAITBLOCK is 2
+    int state; //TERMINATED is -1, RUNNING is 0, READY is 1, WAITBLOCK is 2
     long time_to_switch;
     int nchild;
     struct pcb *next;
@@ -305,6 +309,19 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         }
         return pp1->ctx;
     }
+
+    if (pp1->state == PCB_TERMINATED) {
+        // free region 0 memory
+        int itr;
+        for (itr = MEM_INVALID_PAGES; itr < (VMEM_REGION_SIZE >> PAGESHIFT); itr++) {
+            free_page_enq(REGION_0, itr);
+        }
+        // free region 0 page table
+        add_half_free_pt(pp1->pt_phys_addr);
+        // free pcb
+        free(pp1);
+    }
+
     printf("Starts context switching...\n");
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
     running_block = pp2;
@@ -377,11 +394,53 @@ pcb *get_next_proc_on_queue(pcb *q_head, pcb *q_tail) {
     return to_return;
 }
 
+/* Enqueue a new child exit info */
+void enq_cei(pcb *parent, cei *info) {
+    if (parent->exited_children_head == NULL) {
+        parent->exited_children_head = info;
+        parent->exited_children_tail = info;
+    } else {
+        parent->exited_children_tail->next = info;
+        parent->exited_children_tail = info;
+    }
+}
+
+/* Adjust the order of siblings when a child exits */
+void adjust_siblings(pcb *parent, pcb *exited_child) {
+    pcb *brother = parent->children;
+    if (brother == exited_child) {
+        parent->children = brother->sibling;
+        return;
+    }
+
+    while (brother->sibling != exited_child) {
+        brother = brother->sibling;
+    }
+    brother->sibling = exited_child->sibling;
+}
+
+/* Terminate the running process by informing its parent and children */
 void terminate_process(int status) {
+    running_block->state = PCB_TERMINATED;
+
     // let parent know the process is being terminated
     if (running_block->parent != NULL) {
-        cei *info = 
+        cei *info = (cei *) calloc(1, sizeof(struct cei));
+        info->pid = running_block->pid;
+        info->status = status;
+        parent->nchild -= 1;
+        enq_cei(running_block->parent, info);
+        adjust_siblings(parent, running_block);
     }
+    // let children know the process is exiting
+    if (running_block->children != NULL) {
+        pcb *child = running_block->children;
+        while (child != NULL) {
+            child->parent = NULL;
+            child = child->sibling;
+        }
+    }
+    // memory related operation will be performed in context switch
 }
 
 /************************ Trap Handlers *************************/
