@@ -19,7 +19,7 @@
 #define PCB_READY 1
 #define PCB_WAITBLOC 2
 
-#define READY_Q NUM_TERMINALS
+#define READY_Q NUM_TERMINALS * 2
 #define DELAY_Q READY_Q + 1
 
 /* Type definitions */
@@ -48,6 +48,13 @@ typedef struct pcb {
     int brk_pn;
     int stack_pn;
 } pcb;
+
+typedef struct line {
+    void *buf;
+    int cur;
+    int len;
+    struct line next;
+} line;
 
 /* Kernel Start Methods */
 void init_interrupt_vector_table();
@@ -117,21 +124,30 @@ ExceptionStackFrame *EXCEPTION_FRAME_ADDR; //need further check!!!
 pcb *running_block = NULL; //when updated, update region_0_pt also!!!
 pcb *ready_head = NULL, *ready_tail = NULL;
 pcb *delay_head = NULL, *delay_tail = NULL; //Delay function should keep this list sorted
-pcb *tty_head[NUM_TERMINALS], *tty_tail[NUM_TERMINALS];
+pcb *tty_head[NUM_TERMINALS * 2], *tty_tail[NUM_TERMINALS * 2]; //first NUM_TERMINALS are for receiving; second NUM_TERMINALS are for transmiting
+pcb *tty_transmiting[NUM_TERMINALS];
 pcb *idle_pcb = NULL;
+
+line *line_head = NULL, *line_tail = NULL;
+
 int init_returned = 0;
 
 extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void *orig_brk, char **cmd_args) {
     EXCEPTION_FRAME_ADDR = frame;
     kernel_break = orig_brk;
     pmem_limit = (void *)((long)PMEM_BASE + pmem_size);
-    tty_head = calloc(NUM_TERMINALS, sizeof(pcb *));
+    tty_head = calloc(2 * NUM_TERMINALS, sizeof(pcb *));
     if (tty_head == NULL) {
         fprintf(stderr, "Not enough memory for initialize kernel.\n");
         return;
     }
-    tty_tail = calloc(NUM_TERMINALS, sizeof(pcb *));
+    tty_tail = calloc(2 * NUM_TERMINALS, sizeof(pcb *));
     if (tty_tail == NULL) {
+        fprintf(stderr, "Not enough memory for initialize kernel.\n");
+        return;
+    }
+    tty_transmiting = calloc(NUM_TERMINALS, sizeof(pcb *));
+    if (tty_transmiting == NULL) {
         fprintf(stderr, "Not enough memory for initialize kernel.\n");
         return;
     }
@@ -416,12 +432,14 @@ void add_next_proc_on_queue(int whichQ, pcb *toadd) {
     if (whichQ < 0 || whichQ > DELAY_Q) return NULL;
     toadd->next = NULL;
     if (whichQ < READY_Q) {
-        if (tty_head[whichQ] == NULL) tty_head[whichQ] = tty_tail[whichQ] = toadd;
+        if (tty_head[whichQ] == NULL) tty_head[whichQ] = toadd;
         else tty_tail[whichQ]->next = toadd;
+        tty_tail[whichQ] = toadd;
     }
     else if (whichQ == READY_Q) {
-        if (ready_head == NULL) ready_head = ready_tail = toadd;
+        if (ready_head == NULL) ready_head = toadd;
         else ready_tail->next = toadd;
+        ready_tail = toadd;
     }
     else {
         if (delay_head == NULL) delay_head = delay_tail = toadd;
@@ -511,10 +529,8 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     printf("Trapped Clock...\n");
     sys_time++;
     printf("Current system time is %lu\n", sys_time);
-    if (delay_head != NULL && delay_head->time_to_switch == sys_time) {
-        pcb *ready = get_next_proc_on_queue(DELAY_Q);
-        add_next_proc_on_queue(READY_Q, ready);
-    }
+    if (delay_head != NULL && delay_head->time_to_switch == sys_time) 
+        add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(DELAY_Q));
     if (running_block == idle || running_block->time_to_switch == sys_time) {
         if (ready_head != NULL) {
             ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
@@ -634,11 +650,49 @@ void trap_math_handler(ExceptionStackFrame *frame){
     }
 
 }
+
 void trap_tty_receive_handler(ExceptionStackFrame *frame){
     printf("Trapped Tty Receive...\n");
+    int tty = frame->code;
+    void *buf = malloc(sizeof(char) * TERMINAL_MAX_LINE);
+    if (buf == NULL) {
+        fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
+        return;
+    }
+    int len = TtyReceive(tty, buf, TERMINAL_MAX_LINE);
+    if (len > 0) {
+        line *newline = malloc(sizeof(line));
+        if (newline == NULL) {
+            fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
+            return;
+        }
+        newline->buf = malloc(sizeof(char) * len);
+        if (newline->buf == NULL) {
+            fprintf(stderr, "Malloc error, tty_receiver_handler abort.\n");
+            return;
+        }
+        memcpy(newline->buf, buf, len);
+        free(buf);
+        newline->cur = 0;
+        newline->len = len;
+        if (line_head == NULL) line_head = newline;
+        else line_tail->next = newline;
+        line_tail = newline;
+
+        if (tty_head[tty] != NULL)
+            add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty));
+    }
 }
+
 void trap_tty_transmit_handler(ExceptionStackFrame *frame){
     printf("Trapped Tty Transmit...\n");
+    int tty = frame->code;
+    if (tty_transmiting[tty] != NULL) {
+        add_next_proc_on_queue(READY_Q, tty_transmiting[tty]);
+        tty_transmiting[tty] = NULL;
+        if (tty_head[tty + NUM_TERMINALS] != NULL)
+            add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty + NUM_TERMINALS));
+    }
 }
 
 /************************************* Memory Management Util Methods **********************************************/
