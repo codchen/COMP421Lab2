@@ -22,6 +22,8 @@
 #define READY_Q NUM_TERMINALS * 2
 #define DELAY_Q READY_Q + 1
 
+#define READ_WRITE_PERM PROT_READ|PROT_WRITE
+
 /* Type definitions */
 typedef void (*trap_handler)(ExceptionStackFrame *frame);   // definition of trap handlers
 
@@ -260,12 +262,12 @@ void init_initial_page_tables() {
 
     region_1_pt[region_0_pt_idx].pfn = (long)region_0_pt >> PAGESHIFT;
     region_1_pt[region_0_pt_idx].uprot = 0;
-    region_1_pt[region_0_pt_idx].kprot = PROT_READ | PROT_WRITE;
+    region_1_pt[region_0_pt_idx].kprot = READ_WRITE_PERM;
     region_1_pt[region_0_pt_idx].valid = 1;
 
     region_1_pt[region_1_pt_idx].pfn = (long)region_1_pt >> PAGESHIFT;
     region_1_pt[region_1_pt_idx].uprot = 0;
-    region_1_pt[region_1_pt_idx].kprot = PROT_READ | PROT_WRITE;
+    region_1_pt[region_1_pt_idx].kprot = READ_WRITE_PERM;
     region_1_pt[region_1_pt_idx].valid = 1;
 
     WriteRegister(REG_PTR0, (RCS421RegVal)region_0_pt);
@@ -621,7 +623,6 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
     }
     sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
     fprintf(stderr, error_msg);
-    free(reason);
     terminate_process(ERROR);
     pcb *next_proc = get_next_proc_on_queue(READY_Q);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc));
@@ -629,6 +630,48 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
 }
 void trap_memory_handler(ExceptionStackFrame *frame){
     printf("Trapped Memory...%p, %p, %p\n", frame->pc, frame->sp, frame->addr);
+    void *addr = frame->addr;
+    int code = frame->code;
+    int term_proc = 1;      // check if the process needs to be terminated 0: no, 1: yes
+    char error_msg[255];
+    char *reason;
+    switch(code) {
+        case TRAP_MEMORY_MAPERR:   /* No mapping at %p */
+            if ((long) addr >= VMEM_1_BASE) {   // referenced address is in region 1
+                reason = "user process attempted to reference kernel address at ";
+            } else if (((long)addr >> PAGESHIFT) < running_block->brk_pn){
+                reason = "user process attempted to reference an address in user heap at ";
+            } else if (((long)addr >> PAGESHIFT) > running_block->stack_pn) {
+                reason = "user process attempted to reference unmapped page above user stack at ";
+            } else if ((DOWN_TO_PAGE((long)addr) >> PAGESHIFT) == running_block->brk_pn) {
+                reason = "user process attempted to reference a red zone address between user stack and user heap at  ";
+            } else {
+                term_proc = 0;
+                int itr;
+                for (itr = (DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < frame->sp; itr++) {
+                    free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM)
+                    set_pte(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
+                }
+            }
+            break;
+        case TRAP_MEMORY_ACCERR:   /* Protection violation at %p */
+            reason = "protection is violated at ";
+            break;
+        case TRAP_MEMORY_KERNEL:   /* Linux kernel sent SIGSEGV at %p */
+            reason = "received SIGSEGV from Linux kernel at ";
+            break;
+        case TRAP_MEMORY_USER:     /* Received SIGSEGV from user */
+            reason = "received SIGSEGV from user at ";
+            break;
+    }
+
+    if (term_proc == 1) {
+        sprintf(error_msg, "Kernel terminates process %d because %s%p\n", running_block->pid, reason, addr);
+        fprintf(stderr, error_msg);
+        terminate_process(ERROR);
+        pcb *next_proc = get_next_proc_on_queue(READY_Q);
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc));
+    }
 }
 
 void trap_math_handler(ExceptionStackFrame *frame){
@@ -636,49 +679,49 @@ void trap_math_handler(ExceptionStackFrame *frame){
     int code = frame->code;
     char error_msg[255];
     char *reason;
-        switch(code) {
-        case TRAP_ILLEGAL_ILLOPC:
-            reason = "Illegal Opcode";
-            break;
-        case TRAP_ILLEGAL_ILLOPN:
-            reason = "Illegal Operand";
-            break;
-        case TRAP_ILLEGAL_ILLADR:
-            reason = "Illegal Addressing Mode";
-            break;
-        case TRAP_ILLEGAL_ILLTRP:
-            reason = "Illegal Software Trap";
-            break;
-        case TRAP_ILLEGAL_PRVOPC:
-            reason = "Privileged Opcode";
-            break;
-        case TRAP_ILLEGAL_PRVREG:  
-            reason = "Privileged Register";
-            break;
-        case TRAP_ILLEGAL_COPROC:  
-            reason = "Coprocessor Error";
-            break;
-        case TRAP_ILLEGAL_BADSTK:
-            reason = "Bad Stack";
-            break;
-        case TRAP_ILLEGAL_KERNELI:  
-            reason = "Receiving SIGILL from LINUX Kernel";
-            break;
-        case TRAP_ILLEGAL_USERIB:    
-            reason = "Receiving SIGILL or SIGBUS from User";
-            break;
-        case TRAP_ILLEGAL_ADRALN:
-            reason = "Invalid Address Alignment";
-            break;
-        case TRAP_ILLEGAL_ADRERR:
-            reason = "Non-existant Physical Address";
-            break;
-        case TRAP_ILLEGAL_OBJERR:
-            reason = "Object-specific HW Error";
-            break;
-        case TRAP_ILLEGAL_KERNELB:
-            reason = "Receiving SIGBUS from LINUX Kernel";
-            break;
+    switch(code) {
+    case TRAP_ILLEGAL_ILLOPC:
+        reason = "Illegal Opcode";
+        break;
+    case TRAP_ILLEGAL_ILLOPN:
+        reason = "Illegal Operand";
+        break;
+    case TRAP_ILLEGAL_ILLADR:
+        reason = "Illegal Addressing Mode";
+        break;
+    case TRAP_ILLEGAL_ILLTRP:
+        reason = "Illegal Software Trap";
+        break;
+    case TRAP_ILLEGAL_PRVOPC:
+        reason = "Privileged Opcode";
+        break;
+    case TRAP_ILLEGAL_PRVREG:  
+        reason = "Privileged Register";
+        break;
+    case TRAP_ILLEGAL_COPROC:  
+        reason = "Coprocessor Error";
+        break;
+    case TRAP_ILLEGAL_BADSTK:
+        reason = "Bad Stack";
+        break;
+    case TRAP_ILLEGAL_KERNELI:  
+        reason = "Receiving SIGILL from LINUX Kernel";
+        break;
+    case TRAP_ILLEGAL_USERIB:    
+        reason = "Receiving SIGILL or SIGBUS from User";
+        break;
+    case TRAP_ILLEGAL_ADRALN:
+        reason = "Invalid Address Alignment";
+        break;
+    case TRAP_ILLEGAL_ADRERR:
+        reason = "Non-existant Physical Address";
+        break;
+    case TRAP_ILLEGAL_OBJERR:
+        reason = "Object-specific HW Error";
+        break;
+    case TRAP_ILLEGAL_KERNELB:
+        reason = "Receiving SIGBUS from LINUX Kernel";
+        break;
     }
 
 }
