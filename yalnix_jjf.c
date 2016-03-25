@@ -379,7 +379,7 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
     new_process->state = 0;
     new_process->time_to_switch = sys_time + 2;
     new_process->next = NULL;
-    new_process->parent = NULL;
+    new_process->parent = pid>1?running_block:NULL;
     new_process->child = NULL;
     new_process->sibling = NULL;
     new_process->exited_children_head = NULL;
@@ -516,9 +516,14 @@ void terminate_process(int status) {
         cei *info = (cei *) calloc(1, sizeof(struct cei));
         info->pid = running_block->pid;
         info->status = status;
-        parent->nchild -= 1;
+        running_block->parent->nchild -= 1;
         enq_cei(running_block->parent, info);
-        adjust_siblings(parent, running_block);
+        adjust_siblings(running_block->parent, running_block);
+
+        if (running_block->parent->state == 2) {
+            running_block->parent->state = 1;
+            add_next_proc_on_queue(READY_Q, running_block->parent);
+        }
     }
     // let children know the process is exiting
     if (running_block->children != NULL) {
@@ -787,35 +792,43 @@ extern int Fork() {
         return ERROR;
     }
     new_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
-
-    int i;
-    for (i = MEM_INVALID_PAGES; i < running_block->brk_pn; i++) {
-        if ((long)kernel_break >= VMEM_LIMIT) {
-            fprintf(stderr, "Kernel virtual space full, cannot fork\n");
-            return ERROR;
-        }
-        int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-        int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
-        if (pfn < 0) {
-            fprintf(stderr, "cannot copy memory image for fork\n");
-            return ERROR;
-        }
-        memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
-        clear_pte(REGION_1, k_index);
-
-        set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(new_pcb->pt_phys_addr) >> PAGESHIFT);
-        struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(new_pcb->pt_phys_addr) % PAGESIZE);
-        new_pt_virtual_addr[i].valid = 1;
-        new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
-        new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
-        new_pt_virtual_addr[i].pfn = pfn;
-        clear_pte(REGION_1, k_index);
-    }
-
-    add_next_proc_on_queue(READY_Q, running_block);
-    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)new_pcb);
     if (running_block->pid == new_pcb->pid) return 0;
-    else return new_pcb->pid;
+    else {
+        int i;
+        for (i = MEM_INVALID_PAGES; i < running_block->brk_pn; i++) {
+            if ((long)kernel_break >= VMEM_LIMIT) {
+                fprintf(stderr, "Kernel virtual space full, cannot fork\n");
+                return ERROR;
+            }
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
+            if (pfn < 0) {
+                fprintf(stderr, "cannot copy memory image for fork\n");
+                return ERROR;
+            }
+            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
+            clear_pte(REGION_1, k_index);
+
+            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(new_pcb->pt_phys_addr) >> PAGESHIFT);
+            struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(new_pcb->pt_phys_addr) % PAGESIZE);
+            new_pt_virtual_addr[i].valid = 1;
+            new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
+            new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
+            new_pt_virtual_addr[i].pfn = pfn;
+            clear_pte(REGION_1, k_index);
+        }
+        pcb *child = running_block->child;
+        if (child == NULL) running_block->child = new_pcb;
+        else {
+            while (child->sibling != NULL) child = child->sibling;
+            child->sibling = new_pcb;
+        }
+        running_block->nchild++;
+        add_next_proc_on_queue(READY_Q, new_pcb);
+        add_next_proc_on_queue(READY_Q, running_block);
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+        return new_pcb->pid;
+    }
 }
 
 extern int Exec(char *filename, char **argvec) {
@@ -841,7 +854,26 @@ extern int Exec(char *filename, char **argvec) {
 }
 
 extern void Exit(int) __attribute__ ((noreturn));
-extern int Wait(int *);
+
+extern int Wait(int *status_ptr) {
+    if (running_block->nchild == 0) {
+        fprintf("Wait: no more children of current process.\n");
+        return ERROR;
+    }
+    if (check_buffer((void *)status_ptr, sizeof(int), PROT_WRITE) < 0) {
+        fprintf("Wait: status pointer not accessible by kernel.\n");
+        return ERROR;
+    }
+    if (running_block->exited_children_head == NULL) {
+        running_block->state = 2;
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, get_next_proc_on_queue(READY_Q));
+    }
+    *status_ptr = exited_children_head->status;
+    int res = exited_children_head->pid;
+    running_block->exited_children_head = running_block->exited_children_head->next;
+    if (running_block->exited_children_head == NULL) running_block->exited_children_tail = NULL;
+    return res;
+}
 
 extern int GetPid() {
     return running_block->pid;
