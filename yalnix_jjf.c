@@ -55,7 +55,7 @@ typedef struct line {
     void *buf;
     int cur;
     int len;
-    struct line next;
+    struct line *next;
 } line;
 
 /* Kernel Start Methods */
@@ -130,8 +130,8 @@ ExceptionStackFrame *EXCEPTION_FRAME_ADDR; //need further check!!!
 pcb *running_block = NULL; //when updated, update region_0_pt also!!!
 pcb *ready_head = NULL, *ready_tail = NULL;
 pcb *delay_head = NULL, *delay_tail = NULL; //Delay function should keep this list sorted
-pcb *tty_head[NUM_TERMINALS * 2], *tty_tail[NUM_TERMINALS * 2]; //first NUM_TERMINALS are for receiving; second NUM_TERMINALS are for transmiting
-pcb *tty_transmiting[NUM_TERMINALS];
+pcb **tty_head, **tty_tail; //first NUM_TERMINALS are for receiving; second NUM_TERMINALS are for transmiting
+pcb **tty_transmiting;
 pcb *idle_pcb = NULL;
 
 line *line_head = NULL, *line_tail = NULL;
@@ -142,17 +142,17 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     EXCEPTION_FRAME_ADDR = frame;
     kernel_break = orig_brk;
     pmem_limit = (void *)((long)PMEM_BASE + pmem_size);
-    tty_head = calloc(2 * NUM_TERMINALS, sizeof(pcb *));
+    tty_head = (pcb **)calloc(2 * NUM_TERMINALS, sizeof(pcb *));
     if (tty_head == NULL) {
         fprintf(stderr, "Not enough memory for initialize kernel.\n");
         return;
     }
-    tty_tail = calloc(2 * NUM_TERMINALS, sizeof(pcb *));
+    tty_tail = (pcb **)calloc(2 * NUM_TERMINALS, sizeof(pcb *));
     if (tty_tail == NULL) {
         fprintf(stderr, "Not enough memory for initialize kernel.\n");
         return;
     }
-    tty_transmiting = calloc(NUM_TERMINALS, sizeof(pcb *));
+    tty_transmiting = (pcb **)calloc(NUM_TERMINALS, sizeof(pcb *));
     if (tty_transmiting == NULL) {
         fprintf(stderr, "Not enough memory for initialize kernel.\n");
         return;
@@ -429,7 +429,7 @@ pcb *get_next_proc_on_queue(int whichQ) {
         pcb *to_return = ready_head;
         if (ready_head == ready_tail) ready_head = ready_tail = NULL;
         else ready_head = ready_head->next;
-        return (to_return == NULL)?idle:to_return;
+        return (to_return == NULL)?idle_pcb:to_return;
     }
     else {
         pcb *to_return = delay_head;
@@ -440,7 +440,7 @@ pcb *get_next_proc_on_queue(int whichQ) {
 }
 
 void add_next_proc_on_queue(int whichQ, pcb *toadd) {
-    if (whichQ < 0 || whichQ > DELAY_Q) return NULL;
+    if (whichQ < 0 || whichQ > DELAY_Q) return;
     toadd->next = NULL;
     if (whichQ < READY_Q) {
         if (tty_head[whichQ] == NULL) tty_head[whichQ] = toadd;
@@ -495,9 +495,9 @@ void enq_cei(pcb *parent, cei *info) {
 
 /* Adjust the order of siblings when a child exits */
 void adjust_siblings(pcb *parent, pcb *exited_child) {
-    pcb *brother = parent->children;
+    pcb *brother = parent->child;
     if (brother == exited_child) {
-        parent->children = brother->sibling;
+        parent->child = brother->sibling;
         return;
     }
 
@@ -513,7 +513,7 @@ void terminate_process(int status) {
 
     // let parent know the process is being terminated
     if (running_block->parent != NULL) {
-        cei *info = (cei *) calloc(1, sizeof(struct cei));
+        cei *info = (cei *) calloc(1, sizeof(cei));
         info->pid = running_block->pid;
         info->status = status;
         running_block->parent->nchild -= 1;
@@ -526,8 +526,8 @@ void terminate_process(int status) {
         }
     }
     // let children know the process is exiting
-    if (running_block->children != NULL) {
-        pcb *child = running_block->children;
+    if (running_block->child != NULL) {
+        pcb *child = running_block->child;
         while (child != NULL) {
             child->parent = NULL;
             child = child->sibling;
@@ -579,7 +579,7 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     printf("Current system time is %lu\n", sys_time);
     if (delay_head != NULL && delay_head->time_to_switch == sys_time) 
         add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(DELAY_Q));
-    if (running_block == idle || running_block->time_to_switch == sys_time) {
+    if (running_block == idle_pcb || running_block->time_to_switch == sys_time) {
         if (ready_head != NULL) {
             ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
         }
@@ -639,7 +639,7 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
     fprintf(stderr, error_msg);
     terminate_process(ERROR);
     pcb *next_proc = get_next_proc_on_queue(READY_Q);
-    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc));
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc);
 
 }
 void trap_memory_handler(ExceptionStackFrame *frame){
@@ -662,9 +662,8 @@ void trap_memory_handler(ExceptionStackFrame *frame){
             } else {
                 term_proc = 0;
                 int itr;
-                for (itr = (DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < frame->sp; itr++) {
-                    free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM)
-                    set_pte(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
+                for (itr = DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < running_block->stack_pn; itr++) {
+                    free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
                 }
             }
             break;
@@ -684,14 +683,13 @@ void trap_memory_handler(ExceptionStackFrame *frame){
         fprintf(stderr, error_msg);
         terminate_process(ERROR);
         pcb *next_proc = get_next_proc_on_queue(READY_Q);
-        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc));
+        ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc);
     }
 }
 
 void trap_math_handler(ExceptionStackFrame *frame){
     printf("Trapped Math...\n");
     int code = frame->code;
-    char error_msg[255];
     char *reason;
     switch(code) {
     case TRAP_ILLEGAL_ILLOPC:
@@ -791,7 +789,7 @@ extern int Fork() {
         fprintf(stderr, "Error allocate free physical page table\n");
         return ERROR;
     }
-    new_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
+    pcb *new_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
     if (running_block->pid == new_pcb->pid) return 0;
     else {
         int i;
@@ -853,26 +851,27 @@ extern int Exec(char *filename, char **argvec) {
     return 0;
 }
 
-extern void Exit(int status) {
+extern void Exit(int status){
     terminate_process(status);
+    while(1){}
 }
 
 extern int Wait(int *status_ptr) {
     if (running_block->nchild == 0) {
-        fprintf("Wait: no more children of current process.\n");
+        fprintf(stderr, "Wait: no more children of current process.\n");
         return ERROR;
     }
     if (check_buffer((void *)status_ptr, sizeof(int), PROT_WRITE) < 0) {
-        fprintf("Wait: status pointer not accessible by kernel.\n");
+        fprintf(stderr, "Wait: status pointer not accessible by kernel.\n");
         return ERROR;
     }
     if (running_block->exited_children_head == NULL) {
         running_block->state = 2;
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, get_next_proc_on_queue(READY_Q));
     }
-    *status_ptr = exited_children_head->status;
-    int res = exited_children_head->pid;
-    cei* tmp = exited_children_head;
+    *status_ptr = running_block->exited_children_head->status;
+    int res = running_block->exited_children_head->pid;
+    cei* tmp = running_block->exited_children_head;
     running_block->exited_children_head = running_block->exited_children_head->next;
     if (running_block->exited_children_head == NULL) running_block->exited_children_tail = NULL;
     free(tmp);
@@ -925,7 +924,7 @@ extern int TtyRead(int tty_id, void *buf, int len) {
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
     }
     if (len >= line_head->len - line_head->cur) {
-        int res = line_head->len - line_head->cur
+        int res = line_head->len - line_head->cur;
         memcpy(buf, (void *)((long)line_head->buf + line_head->cur), res);
         line_head = line_head->next;
         if (line_head == NULL) line_tail = NULL;
@@ -960,14 +959,14 @@ extern int TtyWrite(int tty_id, void *buf, int len) {
 int check_buffer(void *buf, int len, int prot) {
     int cur_pn = (int)(((long)buf)>>PAGESHIFT);
     for (cur_pn = (int)(((long)buf)>>PAGESHIFT);
-         i < (int)(UP_TO_PAGE((long)buf + len)>>PAGESHIFT); i++) {
+         cur_pn < (int)(UP_TO_PAGE((long)buf + len)>>PAGESHIFT); cur_pn++) {
         if (!region_0_pt[cur_pn].valid || !(region_0_pt[cur_pn].kprot & prot))
             return -1;
     }
     return 0;
 }
 
-int check_string(void *string) {
+int check_string(char *string) {
     int cur_pn = (int)(((long)string)>>PAGESHIFT);
     int i = 0;
     while(1) {
@@ -1113,7 +1112,7 @@ void validate_region_0_pt() {
 
 /* Given a virtual address, return its physical address*/
 void *v2p(void *vaddr) {
-    struct pte *region = (long)vadd r < VMEM_1_BASE ? region_0_pt:region_1_pt;
+    struct pte *region = (long)vaddr < VMEM_1_BASE ? region_0_pt:region_1_pt;
     if ((long)vaddr >= VMEM_1_BASE) vaddr -= VMEM_1_BASE;
     return (void *)((long)((region[(long)vaddr >> PAGESHIFT].pfn << PAGESHIFT) + (long)vaddr % PAGESIZE));
 }
