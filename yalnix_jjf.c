@@ -102,7 +102,7 @@ extern void Exit(int) __attribute__ ((noreturn));
 extern int Wait(int *);
 extern int GetPid(void);
 extern int Brk(void *);
-extern int Delay(int);
+extern int Delay(int clock_ticks);
 extern int TtyRead(int, void *, int);
 extern int TtyWrite(int, void *, int);
 
@@ -825,9 +825,32 @@ extern int GetPid() {
     return running_block->pid;
 }
 
-extern int Brk(void *);
+extern int Brk(void *addr) {
+    int new_brk = UP_TO_PAGE(addr) >> PAGESHIFT;
+    if (new_brk < running_block->brk_pn && new_brk >= MEM_INVALID_PAGES) {  // move brk down
+        int itr;
+        for (itr = new_brk; itr < running_block->brk_pn; itr++) {
+            free_page_enq(REGION_0, itr);
+        }
+        running_block->brk_pn = new_brk;
+        return 0;
+    } else if (new_brk >= running_block->brk_pn && new_brk < running_block->stack_pn) { // move brk up
+        int itr;
+        for (itr = running_block->brk_pn; itr < new_brk; itr++) {
+            free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
+        }
+        running_block->brk_pn = new_brk;
+        return 0;
+    }
+    return ERROR;
+}
 
-extern int Delay(int);
+extern int Delay(int clock_ticks) {
+    running_block->state = PCB_WAITBLOC;
+    running_block->time_to_switch = sys_time + clock_ticks;
+    add_next_proc_on_queue(DELAY_Q, running_block);
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+}
 
 extern int TtyRead(int tty_id, void *buf, int len) {
     if (len < 0) return ERROR;
