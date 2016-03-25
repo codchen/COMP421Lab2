@@ -106,6 +106,9 @@ extern int Delay(int);
 extern int TtyRead(int, void *, int);
 extern int TtyWrite(int, void *, int);
 
+int check_buffer(void *buf, int len, int prot);
+int check_string(char *string);
+
 
 /* Switch Function*/
 SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2);
@@ -863,6 +866,23 @@ extern int TtyWrite(int tty_id, void *buf, int len) {
     TtyTransmit(tty_id, buf, len);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
     return len;
+}
+
+int check_buffer(void *buf, int len, int prot) {
+
+    return 0;
+}
+
+int check_string(char *string) {
+    int cur_pn = (int)(((long)string)>>PAGESHIFT);
+    int i;
+    while(1) {
+        if (!region_0_pt[cur_pn].valid || !(region_0_pt[cur_pn].kprot & PROT_READ))
+            return -1;
+        for (i = 0; i < PAGESIZE; i++) {
+            if (string[i] == '\0') return 0;
+        }
+    }
 }
 
 /************************************* Memory Management Util Methods **********************************************/
