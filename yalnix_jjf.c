@@ -108,6 +108,7 @@ extern int TtyWrite(int, void *, int);
 
 int check_buffer(void *buf, int len, int prot);
 int check_string(char *string);
+int check_arg(char **arg);
 
 
 /* Switch Function*/
@@ -818,7 +819,25 @@ extern int Fork() {
 }
 
 extern int Exec(char *filename, char **argvec) {
-    return load_program_from_file(filename, argvec);
+    if (check_string(filename) < 0) {
+        fprintf(stderr, "Exec: filename cannot be accessed.\n");
+        return ERROR;
+    }
+    if (check_arg(argvec) < 0) {
+        fprintf(stderr, "Exec: argument list cannot be accessed.\n");
+        return ERROR;
+    }
+    int i = 0;
+    while(1) {
+        if (check_string(argvec[i]) < 0) {
+            fprintf(stderr, "Exec: the %dth argument cannot be accessed.\n", i);
+            return ERROR;
+        }
+        if (argvec[i] == NULL) break;
+        i++;
+    }
+    if (load_program_from_file(filename, argvec) < 0) return ERROR;
+    return 0;
 }
 
 extern void Exit(int) __attribute__ ((noreturn));
@@ -849,15 +868,22 @@ extern int Brk(void *addr) {
 }
 
 extern int Delay(int clock_ticks) {
+    if (clock_ticks < 0) return ERROR;
+    if (clock_ticks == 0) return 0;
     running_block->state = PCB_WAITBLOC;
     running_block->time_to_switch = sys_time + clock_ticks;
     add_next_proc_on_queue(DELAY_Q, running_block);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+    return 0;
 }
 
 extern int TtyRead(int tty_id, void *buf, int len) {
     if (len < 0) return ERROR;
     if (len == 0) return 0;
+    if (check_buffer(buf, len, PROT_WRITE) < 0) {
+        fprintf(stderr, "TtyRead: buf not valid for kernel to write in.\n");
+        return ERROR;
+    }
     if (line_head == NULL) {
         add_next_proc_on_queue(tty_id, running_block);
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
@@ -881,6 +907,10 @@ extern int TtyRead(int tty_id, void *buf, int len) {
 extern int TtyWrite(int tty_id, void *buf, int len) {
     if (len < 0 || len > TERMINAL_MAX_LINE) return ERROR;
     if (len == 0) return 0;
+    if (check_buffer(buf, len, PROT_READ) < 0) {
+        fprintf(stderr, "TtyRead: buf not valid for kernel to read from.\n");
+        return ERROR;
+    }
     if (tty_transmiting[tty_id] != NULL) {
         add_next_proc_on_queue(tty_id + NUM_TERMINALS, running_block);
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
@@ -892,19 +922,40 @@ extern int TtyWrite(int tty_id, void *buf, int len) {
 }
 
 int check_buffer(void *buf, int len, int prot) {
-
+    int cur_pn = (int)(((long)buf)>>PAGESHIFT);
+    for (cur_pn = (int)(((long)buf)>>PAGESHIFT);
+         i < (int)(UP_TO_PAGE((long)buf + len)>>PAGESHIFT); i++) {
+        if (!region_0_pt[cur_pn].valid || !(region_0_pt[cur_pn].kprot & prot))
+            return -1;
+    }
     return 0;
 }
 
-int check_string(char *string) {
+int check_string(void *string) {
     int cur_pn = (int)(((long)string)>>PAGESHIFT);
-    int i;
+    int i = 0;
     while(1) {
         if (!region_0_pt[cur_pn].valid || !(region_0_pt[cur_pn].kprot & PROT_READ))
             return -1;
-        for (i = 0; i < PAGESIZE; i++) {
-            if (string[i] == '\0') return 0;
+        while (i < ((cur_pn + 1) << PAGESHIFT) - (long)string) {
+            if (string[i] == '\0') return i;
+            i++;
         }
+        cur_pn++;
+    }
+}
+
+int check_arg(char **arg) {
+    int cur_pn = (int)(((long)arg)>>PAGESHIFT);
+    int i = 0;
+    while(1) {
+        if (!region_0_pt[cur_pn].valid || !(region_0_pt[cur_pn].kprot & PROT_READ))
+            return -1;
+        while (i * sizeof(char *) < ((cur_pn + 1) << PAGESHIFT) - (long)arg) {
+            if (arg[i] == NULL) return i;
+            i++;
+        }
+        cur_pn++;
     }
 }
 
