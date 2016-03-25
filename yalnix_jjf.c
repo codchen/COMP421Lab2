@@ -853,7 +853,9 @@ extern int Exec(char *filename, char **argvec) {
     return 0;
 }
 
-extern void Exit(int) __attribute__ ((noreturn));
+extern void Exit(int status) {
+    terminate_process(status);
+}
 
 extern int Wait(int *status_ptr) {
     if (running_block->nchild == 0) {
@@ -870,8 +872,10 @@ extern int Wait(int *status_ptr) {
     }
     *status_ptr = exited_children_head->status;
     int res = exited_children_head->pid;
+    cei* tmp = exited_children_head;
     running_block->exited_children_head = running_block->exited_children_head->next;
     if (running_block->exited_children_head == NULL) running_block->exited_children_tail = NULL;
+    free(tmp);
     return res;
 }
 
