@@ -69,7 +69,7 @@ void print_pt();
 void *v2p(void *vaddr);
 
 /* Program/process Related Methods */
-void load_program_from_file(char *names, char **args);
+int load_program_from_file(char *names, char **args);
 int LoadProgram(char *name, char **args, int *brk_pn);   // from load template 
 pcb *init_pcb(void *pt_addr, int pid, int is_init_proc);    // initialize pcb
 pcb *get_next_proc_on_queue(int whichQ);
@@ -390,21 +390,26 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
 }
 
 /* Load a program from file, init the program with given page table */
-void load_program_from_file(char *names, char **args) {
+int load_program_from_file(char *names, char **args) {
     //map physical region 0 to virtual region 0
-    validate_region_0_pt();
+    validate_region_0_pt(); //Maybe not necessary
 
     int *brk_pn = malloc(sizeof(int));
+    if (brk_pn == NULL) {
+        fprintf(stderr, "Malloc failed for loading program.\n");
+        return -1;
+    }
     *brk_pn = MEM_INVALID_PAGES;
     int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
         fprintf(stderr, "Load %s failed: %d\n", names, init_res);
-        return;
+        return -1;
     }
     running_block->brk_pn = *brk_pn;
     running_block->stack_pn = (DOWN_TO_PAGE(((ExceptionStackFrame *)((long)EXCEPTION_FRAME_ADDR))->sp) >> PAGESHIFT) - 1;
     free(brk_pn);
     printf("Successfully load %s into kernel\n", names);
+    return 0;
 }
 
 /* Given the head and tail of a pcb queue (ready or delay), return the next available process pcb */
@@ -770,6 +775,59 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
 }
 
 /************************ Kernel calls *************************/
+
+extern int Fork() {
+    void *new_region0 = allocate_physical_pt();
+    if (new_region0 == NULL) {
+        fprintf(stderr, "Error allocate free physical page table\n");
+        return ERROR;
+    }
+    new_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
+
+    int i;
+    for (i = MEM_INVALID_PAGES; i < running_block->brk_pn; i++) {
+        if ((long)kernel_break >= VMEM_LIMIT) {
+            fprintf(stderr, "Kernel virtual space full, cannot fork\n");
+            return ERROR;
+        }
+        int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+        int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
+        if (pfn < 0) {
+            fprintf(stderr, "cannot copy memory image for fork\n");
+            return ERROR;
+        }
+        memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
+        clear_pte(REGION_1, k_index);
+
+        set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(new_pcb->pt_phys_addr) >> PAGESHIFT);
+        struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(new_pcb->pt_phys_addr) % PAGESIZE);
+        new_pt_virtual_addr[i].valid = 1;
+        new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
+        new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
+        new_pt_virtual_addr[i].pfn = pfn;
+        clear_pte(REGION_1, k_index);
+    }
+
+    add_next_proc_on_queue(READY_Q, running_block);
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)new_pcb);
+    if (running_block->pid == new_pcb->pid) return 0;
+    else return new_pcb->pid;
+}
+
+extern int Exec(char *filename, char **argvec) {
+    return load_program_from_file(filename, argvec);
+}
+
+extern void Exit(int) __attribute__ ((noreturn));
+extern int Wait(int *);
+
+extern int GetPid() {
+    return running_block->pid;
+}
+
+extern int Brk(void *);
+
+extern int Delay(int);
 
 extern int TtyRead(int tty_id, void *buf, int len) {
     if (len < 0) return ERROR;
