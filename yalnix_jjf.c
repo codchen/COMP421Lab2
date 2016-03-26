@@ -48,7 +48,7 @@ typedef struct pcb {
     cei *exited_children_tail;
     //TODO: user brk
     int brk_pn;
-    int stack_pn;
+    void *stack_allocated_addr;
 } pcb;
 
 typedef struct line {
@@ -357,7 +357,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     running_block->time_to_switch = sys_time + 2;
     validate_region_0_pt();
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-
+    printf("ContextSwitch finished\n");
     return pp2->ctx;
 }
 
@@ -387,7 +387,7 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
     new_process->nchild = 0;
     if (running_block != NULL) {
         new_process->brk_pn = running_block->brk_pn;
-        new_process->stack_pn = running_block->stack_pn;
+        new_process->stack_allocated_addr = running_block->stack_allocated_addr;
     }
     ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, is_init_proc ? NULL:(void *)new_process);
     return new_process;
@@ -410,7 +410,7 @@ int load_program_from_file(char *names, char **args) {
         return -1;
     }
     running_block->brk_pn = *brk_pn;
-    running_block->stack_pn = (DOWN_TO_PAGE(((ExceptionStackFrame *)((long)EXCEPTION_FRAME_ADDR))->sp) >> PAGESHIFT) - 1;
+    running_block->stack_allocated_addr = EXCEPTION_FRAME_ADDR->sp;
     free(brk_pn);
     printf("Successfully load %s into kernel\n", names);
     return 0;
@@ -655,16 +655,19 @@ void trap_memory_handler(ExceptionStackFrame *frame){
                 reason = "user process attempted to reference kernel address at ";
             } else if (((long)addr >> PAGESHIFT) < running_block->brk_pn){
                 reason = "user process attempted to reference an address in user heap at ";
-            } else if (((long)addr >> PAGESHIFT) > running_block->stack_pn) {
+            } else if (addr >= running_block->stack_allocated_addr) {
+                fprintf(stderr, "stack allocated: %p\n", running_block->stack_allocated_addr);
                 reason = "user process attempted to reference unmapped page above user stack at ";
             } else if ((DOWN_TO_PAGE((long)addr) >> PAGESHIFT) == running_block->brk_pn) {
                 reason = "user process attempted to reference a red zone address between user stack and user heap at  ";
             } else {
                 term_proc = 0;
                 int itr;
-                for (itr = DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < running_block->stack_pn; itr++) {
+                for (itr = DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < DOWN_TO_PAGE((long)running_block->stack_allocated_addr) >> PAGESHIFT; itr++) {
                     free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
                 }
+                running_block->stack_allocated_addr = addr;
+                printf("stack break updated at %p\n", addr);
             }
             break;
         case TRAP_MEMORY_ACCERR:   /* Protection violation at %p */
@@ -815,6 +818,30 @@ extern int Fork() {
             new_pt_virtual_addr[i].pfn = pfn;
             clear_pte(REGION_1, k_index);
         }
+
+        for (i = DOWN_TO_PAGE((long)running_block->stack_allocated_addr) >> PAGESHIFT; i < USER_STACK_LIMIT >> PAGESHIFT; i++) {
+            if ((long)kernel_break >= VMEM_LIMIT) {
+                fprintf(stderr, "Kernel virtual space full, cannot fork\n");
+                return ERROR;
+            }
+            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
+            if (pfn < 0) {
+                fprintf(stderr, "cannot copy memory image for fork\n");
+                return ERROR;
+            }
+            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
+            clear_pte(REGION_1, k_index);
+
+            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(new_pcb->pt_phys_addr) >> PAGESHIFT);
+            struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(new_pcb->pt_phys_addr) % PAGESIZE);
+            new_pt_virtual_addr[i].valid = 1;
+            new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
+            new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
+            new_pt_virtual_addr[i].pfn = pfn;
+            clear_pte(REGION_1, k_index);
+        }
+
         pcb *child = running_block->child;
         if (child == NULL) running_block->child = new_pcb;
         else {
@@ -891,7 +918,7 @@ extern int Brk(void *addr) {
         }
         running_block->brk_pn = new_brk;
         return 0;
-    } else if (new_brk >= running_block->brk_pn && new_brk < running_block->stack_pn) { // move brk up
+    } else if (new_brk >= running_block->brk_pn && new_brk < DOWN_TO_PAGE(running_block->stack_allocated_addr)) { // move brk up
         int itr;
         for (itr = running_block->brk_pn; itr < new_brk; itr++) {
             free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
