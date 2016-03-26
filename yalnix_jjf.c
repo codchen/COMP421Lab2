@@ -67,6 +67,7 @@ void enable_VM();
 /* utils */
 void print_pt();
 void *v2p(void *vaddr);
+int copy_page(int i, void *physical_pt);
 
 /* Program/process Related Methods */
 int load_program_from_file(char *names, char **args);
@@ -313,28 +314,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         printf("Initializing process...\n");
         int i;
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
-            if ((long)kernel_break >= VMEM_LIMIT) {
-                fprintf(stderr, "Kernel virtual space full, cannot copy kernel stack\n");
-                // TODO: I don't think break is enough, maybe return error?
-                break;
-            }
-            int pt_index = PAGE_TABLE_LEN - 1 - i;
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
-            if (pfn < 0) {
-                fprintf(stderr, "cannot copy kernel stack\n");
-                break;
-            }
-            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(pt_index << PAGESHIFT)), PAGESIZE);
-            clear_pte(REGION_1, k_index);
-
-            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(pp1->pt_phys_addr) >> PAGESHIFT);
-            struct pte *pp1_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(pp1->pt_phys_addr) % PAGESIZE);
-            pp1_pt_virtual_addr[pt_index].valid = 1;
-            pp1_pt_virtual_addr[pt_index].kprot = region_0_pt[pt_index].kprot;
-            pp1_pt_virtual_addr[pt_index].uprot = region_0_pt[pt_index].uprot;
-            pp1_pt_virtual_addr[pt_index].pfn = pfn;
-            clear_pte(REGION_1, k_index);
+            if (copy_page(PAGE_TABLE_LEN - 1 - i, pp1->pt_phys_addr) == ERROR) break;
         }
         return pp1->ctx;
     }
@@ -694,6 +674,7 @@ void trap_math_handler(ExceptionStackFrame *frame){
     printf("Trapped Math...\n");
     int code = frame->code;
     char *reason;
+    char error_msg[255];
     switch(code) {
     case TRAP_MATH_INTDIV:     
         reason = "nteger divide by zero";
@@ -789,49 +770,11 @@ extern int Fork() {
     else {
         int i;
         for (i = MEM_INVALID_PAGES; i < running_block->brk_pn; i++) {
-            if ((long)kernel_break >= VMEM_LIMIT) {
-                fprintf(stderr, "Kernel virtual space full, cannot fork\n");
-                return ERROR;
-            }
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
-            if (pfn < 0) {
-                fprintf(stderr, "cannot copy memory image for fork\n");
-                return ERROR;
-            }
-            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
-            clear_pte(REGION_1, k_index);
-
-            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(new_pcb->pt_phys_addr) >> PAGESHIFT);
-            struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(new_pcb->pt_phys_addr) % PAGESIZE);
-            new_pt_virtual_addr[i].valid = 1;
-            new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
-            new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
-            new_pt_virtual_addr[i].pfn = pfn;
-            clear_pte(REGION_1, k_index);
+            if (copy_page(i, new_pcb->pt_phys_addr) == ERROR) return ERROR;
         }
 
         for (i = DOWN_TO_PAGE((long)running_block->stack_allocated_addr) >> PAGESHIFT; i < USER_STACK_LIMIT >> PAGESHIFT; i++) {
-            if ((long)kernel_break >= VMEM_LIMIT) {
-                fprintf(stderr, "Kernel virtual space full, cannot fork\n");
-                return ERROR;
-            }
-            int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-            int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
-            if (pfn < 0) {
-                fprintf(stderr, "cannot copy memory image for fork\n");
-                return ERROR;
-            }
-            memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
-            clear_pte(REGION_1, k_index);
-
-            set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(new_pcb->pt_phys_addr) >> PAGESHIFT);
-            struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(new_pcb->pt_phys_addr) % PAGESIZE);
-            new_pt_virtual_addr[i].valid = 1;
-            new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
-            new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
-            new_pt_virtual_addr[i].pfn = pfn;
-            clear_pte(REGION_1, k_index);
+            if (copy_page(i, new_pcb->pt_phys_addr) == ERROR) return ERROR;
         }
 
         pcb *child = running_block->child;
@@ -1134,6 +1077,30 @@ void *v2p(void *vaddr) {
     struct pte *region = (long)vaddr < VMEM_1_BASE ? region_0_pt:region_1_pt;
     if ((long)vaddr >= VMEM_1_BASE) vaddr -= VMEM_1_BASE;
     return (void *)((long)((region[(long)vaddr >> PAGESHIFT].pfn << PAGESHIFT) + (long)vaddr % PAGESIZE));
+}
+
+int copy_page(int i, void *physical_pt) {
+    if ((long)kernel_break >= VMEM_LIMIT) {
+        fprintf(stderr, "Kernel virtual space full, cannot fork\n");
+        return ERROR;
+    }
+    int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
+    int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
+    if (pfn < 0) {
+        fprintf(stderr, "cannot copy memory image for fork\n");
+        return ERROR;
+    }
+    memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
+    clear_pte(REGION_1, k_index);
+
+    set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)(physical_pt) >> PAGESHIFT);
+    struct pte *new_pt_virtual_addr = (struct pte *)((long)(UP_TO_PAGE(kernel_break)) + (long)(physical_pt) % PAGESIZE);
+    new_pt_virtual_addr[i].valid = 1;
+    new_pt_virtual_addr[i].kprot = region_0_pt[i].kprot;
+    new_pt_virtual_addr[i].uprot = region_0_pt[i].uprot;
+    new_pt_virtual_addr[i].pfn = pfn;
+    clear_pte(REGION_1, k_index);
+    return 0;
 }
 
 /* Print valid entries of region_0_pt and region_1_pt */
