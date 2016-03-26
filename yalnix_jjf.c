@@ -331,7 +331,6 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         // free pcb
         free(pp1);
     }
-    if (pp2==idle_pcb) print_savedcontext(pp2);
     printf("[CONTEXT_SWITCH] Context switch from %d to %d\n", pp1->pid, pp2->pid);
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
     running_block = pp2;
@@ -370,7 +369,6 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
         new_process->stack_allocated_addr = running_block->stack_allocated_addr;
     }
     ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, is_init_proc ? NULL:(void *)new_process);
-    print_savedcontext(new_process);
     return new_process;
 }
 
@@ -385,7 +383,6 @@ int load_program_from_file(char *names, char **args) {
         return -1;
     }
     *brk_pn = MEM_INVALID_PAGES;
-    printf("name: %s, %p\n", names, names);
     int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
         fprintf(stderr, "[LOAD_PROGRAM_FROM_FILE_ERROR] Load %s failed: %d\n", names, init_res);
@@ -394,7 +391,6 @@ int load_program_from_file(char *names, char **args) {
     running_block->brk_pn = *brk_pn;
     running_block->stack_allocated_addr = EXCEPTION_FRAME_ADDR->sp;
     free(brk_pn);
-    printf("name: %s\n", names);
     printf("[LOAD_PROGRAM_FROM_FILE] Successfully load \" %s \"into kernel\n", names);
     return 0;
 }
@@ -574,6 +570,7 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     if (running_block == idle_pcb || running_block->time_to_switch == sys_time) {
         if (ready_head != NULL) {
             printf("    It's context switch time for pid %d\n", running_block->pid);
+            add_next_proc_on_queue(READY_Q, running_block);
             ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
         }
     }
@@ -1065,11 +1062,13 @@ void clear_pte(int isregion1, int vpn) {
 void *allocate_physical_pt() {
     void *res;
     if (upper_next_pt_pfn != -1) {
-        res = (void *)((long)(upper_next_pt_pfn << PAGESHIFT) + PAGE_TABLE_LEN);
+        res = (void *)((long)(upper_next_pt_pfn << PAGESHIFT) + PAGE_TABLE_SIZE);
+            printf("1 %p\n", res);
         upper_next_pt_pfn = read_from_pfn(res);
     } 
     else if (lower_next_pt_pfn != -1) {
         res = (void *)((long)(lower_next_pt_pfn<< PAGESHIFT));
+            printf("2 %p\n", res);
         lower_next_pt_pfn = read_from_pfn(res);
     }
     else {
@@ -1079,9 +1078,10 @@ void *allocate_physical_pt() {
             return NULL;
         }
         res = (void *)((long)(free_page_head << PAGESHIFT));
+            printf("3 %p\n", res);
         free_page_head = read_from_pfn(res);
         // add half of the page to upper_next_pt_pfn
-        add_half_free_pt((void *)((long)res + PAGE_TABLE_LEN));   
+        add_half_free_pt((void *)((long)res + PAGE_TABLE_SIZE));   
     }
     //zero out page table
     int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
@@ -1095,7 +1095,7 @@ void *allocate_physical_pt() {
 /* Add half free page to upper_next_pt_pfn or lower_next_pt_pfn*/
 void add_half_free_pt(void *physical_pt) {
     long pt_val = (long)physical_pt;
-    if (pt_val % PAGESIZE == 0) {
+    if (pt_val % PAGESIZE != 0) {
         write_to_pfn(physical_pt, upper_next_pt_pfn);
         upper_next_pt_pfn = pt_val >> PAGESHIFT;
     } else {
