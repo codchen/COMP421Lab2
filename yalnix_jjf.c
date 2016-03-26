@@ -66,6 +66,7 @@ void enable_VM();
 
 /* utils */
 void print_pt();
+void print_savedcontext(pcb *process);
 void *v2p(void *vaddr);
 int copy_page(int i, void *physical_pt);
 
@@ -108,7 +109,7 @@ extern int TtyRead(int, void *, int);
 extern int TtyWrite(int, void *, int);
 
 int check_buffer(void *buf, int len, int prot);
-int check_string(char *string);
+int check_string(char *string, int prot);
 int check_arg(char **arg);
 
 
@@ -330,7 +331,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         // free pcb
         free(pp1);
     }
-
+    if (pp2==idle_pcb) print_savedcontext(pp2);
     printf("[CONTEXT_SWITCH] Context switch from %d to %d\n", pp1->pid, pp2->pid);
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
     running_block = pp2;
@@ -369,6 +370,7 @@ pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
         new_process->stack_allocated_addr = running_block->stack_allocated_addr;
     }
     ContextSwitch(MySwitchFunc, new_process->ctx, (void *)new_process, is_init_proc ? NULL:(void *)new_process);
+    print_savedcontext(new_process);
     return new_process;
 }
 
@@ -383,6 +385,7 @@ int load_program_from_file(char *names, char **args) {
         return -1;
     }
     *brk_pn = MEM_INVALID_PAGES;
+    printf("name: %s, %p\n", names, names);
     int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
         fprintf(stderr, "[LOAD_PROGRAM_FROM_FILE_ERROR] Load %s failed: %d\n", names, init_res);
@@ -391,6 +394,7 @@ int load_program_from_file(char *names, char **args) {
     running_block->brk_pn = *brk_pn;
     running_block->stack_allocated_addr = EXCEPTION_FRAME_ADDR->sp;
     free(brk_pn);
+    printf("name: %s\n", names);
     printf("[LOAD_PROGRAM_FROM_FILE] Successfully load \" %s \"into kernel\n", names);
     return 0;
 }
@@ -803,25 +807,67 @@ extern int Fork() {
 
 extern int Exec(char *filename, char **argvec) {
     printf("[EXEC] pid %d\n", running_block->pid);
-    if (check_string(filename) < 0) {
+    int name_length = check_string(filename, PROT_READ);
+    if (name_length < 0) {
         fprintf(stderr, "   [EXEC_ERROR]: filename cannot be accessed.\n");
         return ERROR;
     }
-    if (check_arg(argvec) < 0) {
+    int arg_length = check_arg(argvec);
+    if (arg_length < 0) {
         fprintf(stderr, "   [EXEC_ERROR]: argument list cannot be accessed.\n");
         return ERROR;
     }
-    int i = 0;
-    while(1) {
-        if (argvec[i] == NULL) break;
-        if (check_string(argvec[i]) < 0) {
+
+    char *filename_cp = malloc(sizeof(char) * (name_length + 1));
+    if (filename_cp == NULL) {
+        fprintf(stderr, "   [EXEC_ERROR]: malloc failed.\n");
+        return ERROR;
+    }
+    memcpy((void *)filename_cp, (void *)filename, name_length);
+    filename_cp[name_length] = '\0';
+
+    char **argvec_cp = malloc(sizeof(char *) * (arg_length + 1));
+    if (argvec_cp == NULL) {
+        fprintf(stderr, "   [EXEC_ERROR]: malloc failed.\n");
+        free(argvec_cp);
+        return ERROR;
+    }
+    int i;
+    for (i = 0; i < arg_length; i++) {
+        int len = check_string(argvec[i], READ_WRITE_PERM);
+        if (len < 0) {
             fprintf(stderr, "   [EXEC_ERROR]: the %dth argument cannot be accessed.\n", i);
+            free(filename_cp);
+            free(argvec_cp);
             return ERROR;
         }
-        i++;
+        char *arg = malloc(sizeof(char) * (len + 1));
+        if (arg == NULL) {
+            fprintf(stderr, "   [EXEC_ERROR]: the %dth argument cannot be accessed.\n", i);
+            free(filename_cp);
+            int j;
+            for (j = 0; j < i; j++) {
+                free(argvec_cp[j]);
+            }
+            free(argvec_cp);
+            return ERROR;
+        }
+        memcpy((void *)arg, (void *)argvec[i], len);
+        arg[len] = '\0';
+        argvec_cp[i] = arg;
     }
-    if (load_program_from_file(filename, argvec) < 0) return ERROR;
-    return 0;
+    argvec_cp[arg_length] = NULL;
+
+    int ret;
+    if (load_program_from_file(filename_cp, argvec_cp) < 0) ret = ERROR;
+    else ret = 0;
+
+    free(filename_cp);
+    for (i = 0; i < arg_length; i++) {
+        free(argvec_cp[i]);
+    }
+    free(argvec_cp);
+    return ret;
 }
 
 extern void Exit(int status){
@@ -945,7 +991,7 @@ int check_buffer(void *buf, int len, int prot) {
     return 0;
 }
 
-int check_string(char *string) {
+int check_string(char *string, int prot) {
     int cur_pn = (int)(((long)string)>>PAGESHIFT);
     int i = 0;
     while(1) {
@@ -977,6 +1023,8 @@ int check_arg(char **arg) {
 /* Given a virtual page number, add its corresponding physical page to free page list */
 void free_page_enq(int isregion1, int vpn) {
     struct pte *region = isregion1?region_1_pt:region_0_pt;
+    region[vpn].kprot |= PROT_WRITE;
+    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
     *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
     free_page_head = region[vpn].pfn;
     clear_pte(isregion1, vpn);
@@ -1125,12 +1173,20 @@ void print_pt(){
     int i;
     for (i = 0; i < PAGE_TABLE_LEN; i++) {
         if (region_0_pt[i].valid) {
-            printf("0:%d->%d\n", i, region_0_pt[i].pfn);
+            printf("0:%d->%d, prot: %d\n", i, region_0_pt[i].pfn, region_0_pt[i].kprot);
         }
         if (region_1_pt[i].valid) {
-            printf("1:%d->%d\n", i, region_1_pt[i].pfn);
+            printf("1:%d->%d, prot: %d\n", i, region_1_pt[i].pfn, region_1_pt[i].kprot);
         }
     }
+}
+
+void print_savedcontext(pcb *process) {
+    int i;
+    for (i = 0; i < sizeof(SavedContext); i++) {
+        printf("%02X", process->ctx->s[i]);
+    }
+    printf("\n");
 }
 
 /* Load Program */
