@@ -1063,12 +1063,10 @@ void *allocate_physical_pt() {
     void *res;
     if (upper_next_pt_pfn != -1) {
         res = (void *)((long)(upper_next_pt_pfn << PAGESHIFT) + PAGE_TABLE_SIZE);
-            printf("1 %p\n", res);
         upper_next_pt_pfn = read_from_pfn(res);
     } 
     else if (lower_next_pt_pfn != -1) {
         res = (void *)((long)(lower_next_pt_pfn<< PAGESHIFT));
-            printf("2 %p\n", res);
         lower_next_pt_pfn = read_from_pfn(res);
     }
     else {
@@ -1078,7 +1076,6 @@ void *allocate_physical_pt() {
             return NULL;
         }
         res = (void *)((long)(free_page_head << PAGESHIFT));
-            printf("3 %p\n", res);
         free_page_head = read_from_pfn(res);
         // add half of the page to upper_next_pt_pfn
         add_half_free_pt((void *)((long)res + PAGE_TABLE_SIZE));   
