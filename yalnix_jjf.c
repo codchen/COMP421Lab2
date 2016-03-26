@@ -692,50 +692,42 @@ void trap_math_handler(ExceptionStackFrame *frame){
     int code = frame->code;
     char *reason;
     switch(code) {
-    case TRAP_ILLEGAL_ILLOPC:
-        reason = "Illegal Opcode";
+    case TRAP_MATH_INTDIV:     
+        reason = "nteger divide by zero";
         break;
-    case TRAP_ILLEGAL_ILLOPN:
-        reason = "Illegal Operand";
+    case TRAP_MATH_INTOVF:
+        reason =  "Integer overflows";
         break;
-    case TRAP_ILLEGAL_ILLADR:
-        reason = "Illegal Addressing Mode";
+    case TRAP_MATH_FLTDIV:
+        reason = "floating divide by zero";
         break;
-    case TRAP_ILLEGAL_ILLTRP:
-        reason = "Illegal Software Trap";
+    case TRAP_MATH_FLTOVF:
+        reason = "floating overflows";
         break;
-    case TRAP_ILLEGAL_PRVOPC:
-        reason = "Privileged Opcode";
+    case TRAP_MATH_FLTUND:
+        reason = "floating underflows";
         break;
-    case TRAP_ILLEGAL_PRVREG:  
-        reason = "Privileged Register";
+    case TRAP_MATH_FLTRES:
+        reason = "floating has inexact result";
         break;
-    case TRAP_ILLEGAL_COPROC:  
-        reason = "Coprocessor Error";
+    case TRAP_MATH_FLTINV:
+        reason = "invalid floating operation";
         break;
-    case TRAP_ILLEGAL_BADSTK:
-        reason = "Bad Stack";
+    case TRAP_MATH_FLTSUB:
+        reason = "FP subscript out of range";
         break;
-    case TRAP_ILLEGAL_KERNELI:  
-        reason = "Receiving SIGILL from LINUX Kernel";
+    case TRAP_MATH_KERNEL:
+        reason = "Linux kernel sent SIGFPE";
         break;
-    case TRAP_ILLEGAL_USERIB:    
-        reason = "Receiving SIGILL or SIGBUS from User";
-        break;
-    case TRAP_ILLEGAL_ADRALN:
-        reason = "Invalid Address Alignment";
-        break;
-    case TRAP_ILLEGAL_ADRERR:
-        reason = "Non-existant Physical Address";
-        break;
-    case TRAP_ILLEGAL_OBJERR:
-        reason = "Object-specific HW Error";
-        break;
-    case TRAP_ILLEGAL_KERNELB:
-        reason = "Receiving SIGBUS from LINUX Kernel";
+    case TRAP_MATH_USER:
+        reason = "received SIGFPE from user";
         break;
     }
-
+    sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
+    fprintf(stderr, error_msg);
+    terminate_process(ERROR);
+    pcb *next_proc = get_next_proc_on_queue(READY_Q);
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc);
 }
 
 void trap_tty_receive_handler(ExceptionStackFrame *frame){
