@@ -813,11 +813,11 @@ extern int Exec(char *filename, char **argvec) {
     }
     int i = 0;
     while(1) {
+        if (argvec[i] == NULL) break;
         if (check_string(argvec[i]) < 0) {
             fprintf(stderr, "   [EXEC_ERROR]: the %dth argument cannot be accessed.\n", i);
             return ERROR;
         }
-        if (argvec[i] == NULL) break;
         i++;
     }
     if (load_program_from_file(filename, argvec) < 0) return ERROR;
@@ -1299,7 +1299,7 @@ int LoadProgram(char *name, char **args, int* brk_pn) {
 
     // >>>> Leave the first MEM_INVALID_PAGES number of PTEs in the
     // >>>> Region 0 page table unused (and thus invalid)
-     for (i = 0; i < MEM_INVALID_PAGES; i++) {
+    for (i = 0; i < MEM_INVALID_PAGES; i++) {
         region_0_pt[i].valid = 0;
     }
     /* First, the text pages */
