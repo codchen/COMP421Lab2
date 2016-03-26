@@ -13,9 +13,9 @@ StartTerminal(int i)
     int pid;
 
     if (i == TTY_CONSOLE)
-	cmd_argv[0] = "console";
+		cmd_argv[0] = "console";
     else
-	cmd_argv[0] = "shell";
+		cmd_argv[0] = "shell";
     sprintf(numbuf, "%d", i);
     cmd_argv[1] = numbuf;
     cmd_argv[2] = NULL;
@@ -50,11 +50,11 @@ main(int argc, char **argv)
     int pid;
 
     for (i = 0; i < NUM_TERMINALS; i++) {
-	pids[i] = StartTerminal(i);
-	if ((i == TTY_CONSOLE) && (pids[TTY_CONSOLE] < 0)) {
-	    TtyPrintf(TTY_CONSOLE, "Cannot start Console monitor!\n");
-	    Exit(1);
-	}
+		pids[i] = StartTerminal(i);
+		if ((i == TTY_CONSOLE) && (pids[TTY_CONSOLE] < 0)) {
+	    	TtyPrintf(TTY_CONSOLE, "Cannot start Console monitor!\n");
+	    	Exit(1);
+		}
     }
 
     while (1) {
