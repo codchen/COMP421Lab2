@@ -145,17 +145,17 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     pmem_limit = (void *)((long)PMEM_BASE + pmem_size);
     tty_head = (pcb **)calloc(2 * NUM_TERMINALS, sizeof(pcb *));
     if (tty_head == NULL) {
-        fprintf(stderr, "Not enough memory for initialize kernel.\n");
+        fprintf(stderr, "[KERNEL_START_ERROR] Not enough memory to initialize kernel.\n");
         return;
     }
     tty_tail = (pcb **)calloc(2 * NUM_TERMINALS, sizeof(pcb *));
     if (tty_tail == NULL) {
-        fprintf(stderr, "Not enough memory for initialize kernel.\n");
+        fprintf(stderr, "[KERNEL_START_ERROR] Not enough memory for initialize kernel.\n");
         return;
     }
     tty_transmiting = (pcb **)calloc(NUM_TERMINALS, sizeof(pcb *));
     if (tty_transmiting == NULL) {
-        fprintf(stderr, "Not enough memory for initialize kernel.\n");
+        fprintf(stderr, "[KERNEL_START_ERROR] Not enough memory for initialize kernel.\n");
         return;
     }
 
@@ -173,7 +173,7 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     char *idle_proc = "idle";
     void *new_region0 = allocate_physical_pt();
     if (new_region0 == NULL) {
-        fprintf(stderr, "Error allocate free physical page table\n");
+        fprintf(stderr, "[KERNEL_START_ERROR] Error allocate free physical page table\n");
         return;
     }
     idle_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
@@ -192,7 +192,7 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
 
 extern int SetKernelBrk(void *addr) {
     if ((long)addr < VMEM_1_BASE && (long)addr >= VMEM_1_LIMIT) {
-        fprintf(stderr, "Brk out of bound for kernel.\n");
+        fprintf(stderr, "[SET_KERNEL_BRK_ERROR] Brk out of bound for kernel.\n");
         return -1;
     }
     if (!vm_enabled) {
@@ -311,7 +311,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     pcb *pp2 = (pcb *)p2;
     if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
     if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
-        printf("Initializing process...\n");
+        printf("[INIT] Initializing process %d\n", pp1->pid);
         int i;
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
             if (copy_page(PAGE_TABLE_LEN - 1 - i, pp1->pt_phys_addr) == ERROR) break;
@@ -331,13 +331,12 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         free(pp1);
     }
 
-    printf("Starts context switching...\n");
+    printf("[CONTEXT_SWITCH] Context switch from %d to %d\n", pp1->pid, pp2->pid);
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
     running_block = pp2;
     running_block->time_to_switch = sys_time + 2;
     validate_region_0_pt();
     WriteRegister(REG_TLB_FLUSH, TLB_FLUSH_0);
-    printf("ContextSwitch finished\n");
     return pp2->ctx;
 }
 
@@ -346,12 +345,12 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
 pcb *init_pcb(void *pt_phys_addr, int pid, int is_init_proc) {
     pcb *new_process = malloc(sizeof(pcb));
     if (new_process == NULL) {
-        fprintf(stderr, "Faliled malloc pcb for new program\n");
+        fprintf(stderr, "[INIT_PCB_ERROR] Faliled malloc pcb for new program\n");
         return NULL;
     }
     new_process->ctx = calloc(1, sizeof(SavedContext));
     if (new_process->ctx == NULL) {
-        fprintf(stderr, "Failed malloc ctx for new program\n");
+        fprintf(stderr, "[INIT_PCB_ERROR] Failed malloc ctx for new program\n");
         return NULL;
     }
     new_process->pt_phys_addr = pt_phys_addr;
@@ -380,19 +379,19 @@ int load_program_from_file(char *names, char **args) {
 
     int *brk_pn = malloc(sizeof(int));
     if (brk_pn == NULL) {
-        fprintf(stderr, "Malloc failed for loading program.\n");
+        fprintf(stderr, "[LOAD_PROGRAM_FROM_FILE_ERROR] Malloc failed for loading program.\n");
         return -1;
     }
     *brk_pn = MEM_INVALID_PAGES;
     int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
-        fprintf(stderr, "Load %s failed: %d\n", names, init_res);
+        fprintf(stderr, "[LOAD_PROGRAM_FROM_FILE_ERROR] Load %s failed: %d\n", names, init_res);
         return -1;
     }
     running_block->brk_pn = *brk_pn;
     running_block->stack_allocated_addr = EXCEPTION_FRAME_ADDR->sp;
     free(brk_pn);
-    printf("Successfully load %s into kernel\n", names);
+    printf("[LOAD_PROGRAM_FROM_FILE] Successfully load \" %s \"into kernel\n", names);
     return 0;
 }
 
@@ -520,54 +519,64 @@ void terminate_process(int status) {
 
 //may need to terminate malfunctional process in this handler
 void trap_kernel_handler(ExceptionStackFrame *frame){
-    printf("Trapped Kernel Handler...\n");
+    printf("[TRAP_KERNEL] Trapped Kernel Handler, pid %d, Code: ", running_block->pid);
     int code = frame->code;
     switch(code) {
         case YALNIX_FORK:
+            printf("[FORK]\n");
             frame->regs[0] = (unsigned long)Fork();
             break;
         case YALNIX_EXEC:
+            printf("[EXEC]\n");
             frame->regs[0] = (unsigned long)Exec((char *)(frame->regs[1]), (char **)(frame->regs[2]));
             break;
         case YALNIX_EXIT:
+            printf("[EXIT]\n");
             Exit((int)(frame->regs[1]));
             break;
         case YALNIX_WAIT:
+            printf("[WAIT]\n");
             frame->regs[0] = (unsigned long)Wait((int *)(frame->regs[1]));
             break;
         case YALNIX_GETPID:
+            printf("[GET_PID]\n");
             frame->regs[0] = (unsigned long)GetPid();
             break;
         case YALNIX_BRK:
+            printf("[BRK]\n");
             frame->regs[0] = (unsigned long)Brk((void *)(frame->regs[1]));
             break;
         case YALNIX_DELAY:
+            printf("[DELAY]\n");
             frame->regs[0] = (unsigned long)Delay((int)(frame->regs[1]));
             break;
         case YALNIX_TTY_READ:
+            printf("[TTY_READ]\n");
             frame->regs[0] = (unsigned long)TtyRead((int)(frame->regs[1]), (void *)(frame->regs[2]), (int)(frame->regs[3]));
             break;
         case YALNIX_TTY_WRITE:
+            printf("[TTY_WRITE]\n");
             frame->regs[0] = (unsigned long)TtyWrite((int)(frame->regs[1]), (void *)(frame->regs[2]), (int)(frame->regs[3]));
             break;
     }
 }
 
 void trap_clock_handler(ExceptionStackFrame *frame){
-    printf("Trapped Clock...\n");
+    printf("[TRAP_CLOCK] Trapped Clock\n");
     sys_time++;
-    printf("Current system time is %lu\n", sys_time);
+    printf("    Current system time is %lu\n", sys_time);
     if (delay_head != NULL && delay_head->time_to_switch == sys_time) 
         add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(DELAY_Q));
     if (running_block == idle_pcb || running_block->time_to_switch == sys_time) {
         if (ready_head != NULL) {
+            printf("    It's context switch time for pid %d\n", running_block->pid);
             ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
         }
     }
 }
 
 void trap_illegal_handler(ExceptionStackFrame *frame){
-    printf("Trapped Illegal Instruction...\n");
+    printf("[TRAP_ILLEGAL] Trapped Illegal Instruction, pid %d\n", running_block->pid);
     int code = frame->code;
     char error_msg[255];
     char *reason;
@@ -615,15 +624,15 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
             reason = "Receiving SIGBUS from LINUX Kernel";
             break;
     }
-    sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
+    sprintf(error_msg, "    [ERROR] Kernel terminates process %d because of %s\n", running_block->pid, reason);
     fprintf(stderr, error_msg);
     terminate_process(ERROR);
     pcb *next_proc = get_next_proc_on_queue(READY_Q);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *) next_proc);
-
 }
+
 void trap_memory_handler(ExceptionStackFrame *frame){
-    printf("Trapped Memory...%p, %p, %p\n", frame->pc, frame->sp, frame->addr);
+    printf("[TRAP_MEMORY] Trapped Memory...%p, %p, %p, pid %d\n", frame->pc, frame->sp, frame->addr, running_block->pid);
     void *addr = frame->addr;
     int code = frame->code;
     int term_proc = 1;      // check if the process needs to be terminated 0: no, 1: yes
@@ -662,7 +671,7 @@ void trap_memory_handler(ExceptionStackFrame *frame){
     }
 
     if (term_proc == 1) {
-        sprintf(error_msg, "Kernel terminates process %d because %s%p\n", running_block->pid, reason, addr);
+        sprintf(error_msg, "    [ERROR] Kernel terminates process %d because %s%p\n", running_block->pid, reason, addr);
         fprintf(stderr, error_msg);
         terminate_process(ERROR);
         pcb *next_proc = get_next_proc_on_queue(READY_Q);
@@ -671,7 +680,7 @@ void trap_memory_handler(ExceptionStackFrame *frame){
 }
 
 void trap_math_handler(ExceptionStackFrame *frame){
-    printf("Trapped Math...\n");
+    printf("[TRAP_MATH] Trapped Math, pid %d\n", running_block->pid);
     int code = frame->code;
     char *reason;
     char error_msg[255];
@@ -707,7 +716,7 @@ void trap_math_handler(ExceptionStackFrame *frame){
         reason = "received SIGFPE from user";
         break;
     }
-    sprintf(error_msg, "Kernel terminates process %d because of %s\n", running_block->pid, reason);
+    sprintf(error_msg, "    [ERROR] Kernel terminates process %d because %s\n", running_block->pid, reason);
     fprintf(stderr, error_msg);
     terminate_process(ERROR);
     pcb *next_proc = get_next_proc_on_queue(READY_Q);
@@ -715,7 +724,7 @@ void trap_math_handler(ExceptionStackFrame *frame){
 }
 
 void trap_tty_receive_handler(ExceptionStackFrame *frame){
-    printf("Trapped Tty Receive...\n");
+    printf("[TRAP_TTY_RECEIVE] Trapped Tty Receive, pid %d\n", running_block->pid);
     int tty = frame->code;
     void *buf = malloc(sizeof(char) * TERMINAL_MAX_LINE);
     if (buf == NULL) {
@@ -747,7 +756,7 @@ void trap_tty_receive_handler(ExceptionStackFrame *frame){
 }
 
 void trap_tty_transmit_handler(ExceptionStackFrame *frame){
-    printf("Trapped Tty Transmit...\n");
+    printf("[TRAP_TTY_TRANSMIT] Trapped Tty Transmit, pid %d\n", running_block->pid);
     int tty = frame->code;
     if (tty_transmiting[tty] != NULL) {
         add_next_proc_on_queue(READY_Q, tty_transmiting[tty]);
@@ -760,6 +769,7 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
 /************************ Kernel calls *************************/
 
 extern int Fork() {
+    printf("[FORK] pid %d\n", running_block->pid);
     void *new_region0 = allocate_physical_pt();
     if (new_region0 == NULL) {
         fprintf(stderr, "Error allocate free physical page table\n");
@@ -792,18 +802,19 @@ extern int Fork() {
 }
 
 extern int Exec(char *filename, char **argvec) {
+    printf("[EXEC] pid %d\n", running_block->pid);
     if (check_string(filename) < 0) {
-        fprintf(stderr, "Exec: filename cannot be accessed.\n");
+        fprintf(stderr, "   [EXEC_ERROR]: filename cannot be accessed.\n");
         return ERROR;
     }
     if (check_arg(argvec) < 0) {
-        fprintf(stderr, "Exec: argument list cannot be accessed.\n");
+        fprintf(stderr, "   [EXEC_ERROR]: argument list cannot be accessed.\n");
         return ERROR;
     }
     int i = 0;
     while(1) {
         if (check_string(argvec[i]) < 0) {
-            fprintf(stderr, "Exec: the %dth argument cannot be accessed.\n", i);
+            fprintf(stderr, "   [EXEC_ERROR]: the %dth argument cannot be accessed.\n", i);
             return ERROR;
         }
         if (argvec[i] == NULL) break;
@@ -814,17 +825,19 @@ extern int Exec(char *filename, char **argvec) {
 }
 
 extern void Exit(int status){
+    printf("[EXIT] pid %d\n", running_block->pid);
     terminate_process(status);
     while(1){}
 }
 
 extern int Wait(int *status_ptr) {
+    printf("[WAIT] pid %d\n", running_block->pid);
     if (running_block->nchild == 0) {
-        fprintf(stderr, "Wait: no more children of current process.\n");
+        fprintf(stderr, "   [WAIT_ERROR]: no more children of current process.\n");
         return ERROR;
     }
     if (check_buffer((void *)status_ptr, sizeof(int), PROT_WRITE) < 0) {
-        fprintf(stderr, "Wait: status pointer not accessible by kernel.\n");
+        fprintf(stderr, "   [WAIT_ERROR]: status pointer not accessible by kernel.\n");
         return ERROR;
     }
     if (running_block->exited_children_head == NULL) {
@@ -845,6 +858,7 @@ extern int GetPid() {
 }
 
 extern int Brk(void *addr) {
+    printf("[BRK] pid %d\n", running_block->pid);
     int new_brk = UP_TO_PAGE(addr) >> PAGESHIFT;
     if (new_brk < running_block->brk_pn && new_brk >= MEM_INVALID_PAGES) {  // move brk down
         int itr;
@@ -865,6 +879,7 @@ extern int Brk(void *addr) {
 }
 
 extern int Delay(int clock_ticks) {
+    printf("[DELAY] pid %d\n", running_block->pid);
     if (clock_ticks < 0) return ERROR;
     if (clock_ticks == 0) return 0;
     running_block->state = PCB_WAITBLOC;
@@ -875,10 +890,11 @@ extern int Delay(int clock_ticks) {
 }
 
 extern int TtyRead(int tty_id, void *buf, int len) {
+    printf("[TTY_READ] pid %d\n", running_block->pid);
     if (len < 0) return ERROR;
     if (len == 0) return 0;
     if (check_buffer(buf, len, PROT_WRITE) < 0) {
-        fprintf(stderr, "TtyRead: buf not valid for kernel to write in.\n");
+        fprintf(stderr, "   [TTY_READ_ERROR]: buf not valid for kernel to write in.\n");
         return ERROR;
     }
     if (line_head == NULL) {
@@ -902,10 +918,11 @@ extern int TtyRead(int tty_id, void *buf, int len) {
 }
 
 extern int TtyWrite(int tty_id, void *buf, int len) {
+    printf("[TTY_WRITE] pid %d\n", running_block->pid);
     if (len < 0 || len > TERMINAL_MAX_LINE) return ERROR;
     if (len == 0) return 0;
     if (check_buffer(buf, len, PROT_READ) < 0) {
-        fprintf(stderr, "TtyRead: buf not valid for kernel to read from.\n");
+        fprintf(stderr, "   [TTY_WRITE_ERROR]: buf not valid for kernel to write to.\n");
         return ERROR;
     }
     if (tty_transmiting[tty_id] != NULL) {
@@ -969,7 +986,7 @@ void free_page_enq(int isregion1, int vpn) {
 /* Given a virtual page number, assign a physical page to its corresponding pte entry */
 int free_page_deq(int isregion1, int vpn, int kprot, int uprot) {
     if (num_free_pages == 0) {
-        fprintf(stderr, "No enough physical page\n");
+        fprintf(stderr, "[PAGE_DEQ] No enough physical page\n");
         return -1;
     }
     struct pte *region = isregion1 ? region_1_pt:region_0_pt;
@@ -1009,7 +1026,7 @@ void *allocate_physical_pt() {
     }
     else {
         if (free_page_head == -1) {
-            fprintf(stderr, "No more free pages\n");
+            fprintf(stderr, "[ALLOC_NEW_PT] No more free pages\n");
             // TODO: again, here should cause some kernel trap indicating this error
             return NULL;
         }
@@ -1042,7 +1059,7 @@ void add_half_free_pt(void *physical_pt) {
 /* Read next available free pfn/half_pt_pfn of passed in physical_addr */
 int read_from_pfn(void *physical_addr) {
     if ((long)kernel_break >= VMEM_LIMIT) {
-        fprintf(stderr, "Kernel virtual space full, cannot read from physical address\n");
+        fprintf(stderr, "[READ_PFN] Kernel virtual space full, cannot read from physical address\n");
         // TODO: ERROR CHECK
         return -1;
     }
@@ -1057,7 +1074,7 @@ int read_from_pfn(void *physical_addr) {
 /* Write next available free pfn/half_pt_pfn into passed in physical_addr */
 void write_to_pfn(void *physical_addr, int towrite) {
     if ((long)kernel_break >= VMEM_LIMIT) {
-        fprintf(stderr, "Kernel virtual space full, cannot write to physical address\n");
+        fprintf(stderr, "[WRITE_PFN] Kernel virtual space full, cannot write to physical address\n");
         return;
     }
     int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
@@ -1081,13 +1098,13 @@ void *v2p(void *vaddr) {
 
 int copy_page(int i, void *physical_pt) {
     if ((long)kernel_break >= VMEM_LIMIT) {
-        fprintf(stderr, "Kernel virtual space full, cannot fork\n");
+        fprintf(stderr, "   [FORK_ERROR] Kernel virtual space full, cannot fork\n");
         return ERROR;
     }
     int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
     int pfn = free_page_deq(REGION_1, k_index, PROT_ALL, PROT_NONE);    // deq a free page from region 1
     if (pfn < 0) {
-        fprintf(stderr, "cannot copy memory image for fork\n");
+        fprintf(stderr, "   [FORK_ERROR] Cannot copy memory image for fork\n");
         return ERROR;
     }
     memcpy((void *)((long)(UP_TO_PAGE(kernel_break))), (void *)((long)(i << PAGESHIFT)), PAGESIZE);
