@@ -324,7 +324,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         // free region 0 memory
         int itr;
         for (itr = MEM_INVALID_PAGES; itr < (VMEM_REGION_SIZE >> PAGESHIFT); itr++) {
-            free_page_enq(REGION_0, itr);
+            if (region_0_pt[itr].valid) free_page_enq(REGION_0, itr);
         }
         // free region 0 page table
         add_half_free_pt(pp1->pt_phys_addr);
@@ -870,7 +870,7 @@ extern int Exec(char *filename, char **argvec) {
 extern void Exit(int status){
     printf("[EXIT] pid %d\n", running_block->pid);
     terminate_process(status);
-    while(1){}
+    ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
 }
 
 extern int Wait(int *status_ptr) {
