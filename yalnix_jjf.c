@@ -574,6 +574,7 @@ void trap_clock_handler(ExceptionStackFrame *frame){
     if (running_block == idle_pcb || running_block->time_to_switch == sys_time) {
         if (ready_head != NULL) {
             printf("    It's context switch time for pid %d\n", running_block->pid);
+            add_next_proc_on_queue(READY_Q, running_block);
             ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
         }
     }
