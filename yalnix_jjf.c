@@ -907,6 +907,7 @@ extern void Exit(int status){
     printf("    [EXIT] pid %d\n", running_block->pid);
     terminate_process(status);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
+    while(1){}
 }
 
 extern int Wait(int *status_ptr) {
