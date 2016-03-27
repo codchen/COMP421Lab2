@@ -330,6 +330,18 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         add_half_free_pt(pp1->pt_phys_addr);
         // free pcb
         free(pp1);
+
+        if (pp2 == idle_pcb && ready_head == NULL && delay_head == NULL) {
+            int halt = 1;
+            int i;
+            for (i = 0; i < NUM_TERMINALS; i++) {
+                if (tty_head[i] || tty_head[i + NUM_TERMINALS] || tty_transmiting[i]) {
+                    halt = 0;
+                    break;
+                }
+            }
+            if (halt) Halt();
+        }
     }
     printf("[CONTEXT_SWITCH] Context switch from %d to %d\n", pp1->pid, pp2->pid);
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
