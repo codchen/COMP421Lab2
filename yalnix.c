@@ -1120,7 +1120,6 @@ void *allocate_physical_pt() {
     else {
         if (free_page_head == -1) {
             fprintf(stderr, "[ALLOC_NEW_PT] No more free pages\n");
-            // TODO: again, here should cause some kernel trap indicating this error
             return NULL;
         }
         res = (void *)((long)(free_page_head << PAGESHIFT));
@@ -1153,11 +1152,9 @@ void add_half_free_pt(void *physical_pt) {
 int read_from_pfn(void *physical_addr) {
     if ((long)kernel_break >= VMEM_LIMIT) {
         fprintf(stderr, "[READ_PFN] Kernel virtual space full, cannot read from physical address\n");
-        // TODO: ERROR CHECK
         return -1;
     }
     int k_index = UP_TO_PAGE(kernel_break - VMEM_1_BASE) >> PAGESHIFT;
-
     set_pte(REGION_1, k_index, PROT_ALL, PROT_NONE, (long)physical_addr >> PAGESHIFT);
     int res = *(int *)(VMEM_1_BASE + (k_index << PAGESHIFT) + (long)physical_addr % PAGESIZE);
     clear_pte(REGION_1, k_index);
@@ -1176,6 +1173,7 @@ void write_to_pfn(void *physical_addr, int towrite) {
     clear_pte(REGION_1, k_index);
 }
 
+/* set valid bit of region_0_pt pte to 1 */
 void validate_region_0_pt() {
     int region_0_pt_idx = (VMEM_REGION_SIZE >> PAGESHIFT) - 2;
     set_pte(REGION_1, region_0_pt_idx, PROT_ALL, PROT_NONE, (long)(running_block->pt_phys_addr)>>PAGESHIFT);
@@ -1189,6 +1187,7 @@ void *v2p(void *vaddr) {
     return (void *)((long)((region[(long)vaddr >> PAGESHIFT].pfn << PAGESHIFT) + (long)vaddr % PAGESIZE));
 }
 
+/* Copy a page at given vpn to physical_pt */
 int copy_page(int vpn, void *physical_pt) {
     if ((long)kernel_break >= VMEM_LIMIT) {
         fprintf(stderr, "   [FORK_ERROR] Kernel virtual space full, cannot fork\n");
