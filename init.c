@@ -20,9 +20,9 @@ StartTerminal(int i)
     cmd_argv[1] = numbuf;
     cmd_argv[2] = NULL;
 
-    printf("Pid %d calling Fork\n", GetPid());
+    TracePrintf(0, "Pid %d calling Fork\n", GetPid());
     pid = Fork();
-    printf("Pid %d got %d from Fork\n", GetPid(), pid);
+    TracePrintf(0, "Pid %d got %d from Fork\n", GetPid(), pid);
 
     if (pid < 0) {
 	TtyPrintf(TTY_CONSOLE,

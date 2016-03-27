@@ -138,7 +138,7 @@ pcb **tty_head, **tty_tail; //first NUM_TERMINALS are for receiving; second NUM_
 pcb **tty_transmiting;
 pcb *idle_pcb = NULL;
 
-line *line_head = NULL, *line_tail = NULL;
+line **line_head, **line_tail;
 
 int init_returned = 0;
 
@@ -159,6 +159,16 @@ extern void KernelStart(ExceptionStackFrame *frame, unsigned int pmem_size, void
     tty_transmiting = (pcb **)calloc(NUM_TERMINALS, sizeof(pcb *));
     if (tty_transmiting == NULL) {
         fprintf(stderr, "[KERNEL_START_ERROR] Not enough memory for initialize kernel.\n");
+        return;
+    }
+    line_head = (line **)calloc(NUM_TERMINALS, sizeof(line *));
+    if (line_head ==NULL) {
+        fprintf(stderr, "[KERNEL_START_ERROR] Not enough memory to initialize kernel.\n");
+        return;
+    }
+    line_tail = (line **)calloc(NUM_TERMINALS, sizeof(line *));
+    if (line_tail ==NULL) {
+        fprintf(stderr, "[KERNEL_START_ERROR] Not enough memory to initialize kernel.\n");
         return;
     }
 
@@ -314,7 +324,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
     pcb *pp2 = (pcb *)p2;
     if (pp1 == pp2) return pp1->ctx; //initialize SavedContext for currently running process
     if (pp2 == NULL) {               //initialize SavedContext and copy kernel stack for a newly created (not running) process
-        printf("[INIT] Initializing process %d\n", pp1->pid);
+        //printf("[INIT] Initializing process %d\n", pp1->pid);
         int i;
         for (i = 0; i < KERNEL_STACK_PAGES; i++) {
             if (copy_page(PAGE_TABLE_LEN - 1 - i, pp1->pt_phys_addr) == ERROR) break;
@@ -330,6 +340,15 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
         }
         // free region 0 page table
         add_half_free_pt(pp1->pt_phys_addr);
+
+        free(pp1->ctx);
+
+        cei* current = pp1->exited_children_head;
+        while (current != NULL) {
+            cei* next = current->next;
+            free(current);
+            current = next;
+        }
         // free pcb
         free(pp1);
 
@@ -345,7 +364,7 @@ SavedContext *MySwitchFunc(SavedContext *ctxp, void *p1, void *p2) {
             if (halt) Halt();
         }
     }
-    printf("[CONTEXT_SWITCH] Context switch from %d to %d\n", pp1->pid, pp2->pid);
+    //printf("[CONTEXT_SWITCH] Context switch from %d to %d\n", pp1->pid, pp2->pid);
     WriteRegister(REG_PTR0, (RCS421RegVal)((long)(pp2->pt_phys_addr)));
     running_block = pp2;
     running_block->time_to_switch = sys_time + 2;
@@ -399,13 +418,13 @@ int load_program_from_file(char *names, char **args) {
     *brk_pn = MEM_INVALID_PAGES;
     int init_res = LoadProgram(names, args, brk_pn);
     if (init_res < 0) {
-        fprintf(stderr, "[LOAD_PROGRAM_FROM_FILE_ERROR] Load %s failed: %d\n", names, init_res);
+        //fprintf(stderr, "[LOAD_PROGRAM_FROM_FILE_ERROR] Load %s failed: %d\n", names, init_res);
         return -1;
     }
     running_block->brk_pn = *brk_pn;
     running_block->stack_allocated_addr = EXCEPTION_FRAME_ADDR->sp;
     free(brk_pn);
-    printf("[LOAD_PROGRAM_FROM_FILE] Successfully load \" %s \"into kernel\n", names);
+    //printf("[LOAD_PROGRAM_FROM_FILE] Successfully load \" %s \"into kernel\n", names);
     return 0;
 }
 
@@ -533,27 +552,27 @@ void terminate_process(int status) {
 
 //may need to terminate malfunctional process in this handler
 void trap_kernel_handler(ExceptionStackFrame *frame){
-    printf("[TRAP_KERNEL] Trapped Kernel Handler, pid %d, Code: ", running_block->pid);
+    //printf("[TRAP_KERNEL] Trapped Kernel Handler, pid %d, Code: \n", running_block->pid);
     int code = frame->code;
     switch(code) {
         case YALNIX_FORK:
-            printf("[FORK]\n");
+            //printf("[FORK]\n");
             frame->regs[0] = (unsigned long)Fork();
             break;
         case YALNIX_EXEC:
-            printf("[EXEC]\n");
+            //printf("[EXEC]\n");
             frame->regs[0] = (unsigned long)Exec((char *)(frame->regs[1]), (char **)(frame->regs[2]));
             break;
         case YALNIX_EXIT:
-            printf("[EXIT]\n");
+            //printf("[EXIT]\n");
             Exit((int)(frame->regs[1]));
             break;
         case YALNIX_WAIT:
-            printf("[WAIT]\n");
+            //printf("[WAIT]\n");
             frame->regs[0] = (unsigned long)Wait((int *)(frame->regs[1]));
             break;
         case YALNIX_GETPID:
-            printf("[GET_PID]\n");
+            //printf("[GET_PID]\n");
             frame->regs[0] = (unsigned long)GetPid();
             break;
         case YALNIX_BRK:
@@ -565,25 +584,26 @@ void trap_kernel_handler(ExceptionStackFrame *frame){
             frame->regs[0] = (unsigned long)Delay((int)(frame->regs[1]));
             break;
         case YALNIX_TTY_READ:
-            printf("[TTY_READ]\n");
+            //printf("[TTY_READ]\n");
             frame->regs[0] = (unsigned long)TtyRead((int)(frame->regs[1]), (void *)(frame->regs[2]), (int)(frame->regs[3]));
             break;
         case YALNIX_TTY_WRITE:
-            printf("[TTY_WRITE]\n");
+            //printf("[TTY_WRITE]\n");
             frame->regs[0] = (unsigned long)TtyWrite((int)(frame->regs[1]), (void *)(frame->regs[2]), (int)(frame->regs[3]));
             break;
     }
 }
 
 void trap_clock_handler(ExceptionStackFrame *frame){
-    printf("[TRAP_CLOCK] Trapped Clock\n");
+    //printf("[TRAP_CLOCK] Trapped Clock\n");
     sys_time++;
-    printf("    Current system time is %lu\n", sys_time);
-    if (delay_head != NULL && delay_head->time_to_switch == sys_time) 
+    //printf("    Current system time is %lu\n", sys_time);
+    while (delay_head != NULL && delay_head->time_to_switch == sys_time) {
         add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(DELAY_Q));
+    }
     if (running_block == idle_pcb || running_block->time_to_switch == sys_time) {
         if (ready_head != NULL) {
-            printf("    It's context switch time for pid %d\n", running_block->pid);
+            //printf("    It's context switch time for pid %d\n", running_block->pid);
             add_next_proc_on_queue(READY_Q, running_block);
             ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
         }
@@ -647,7 +667,7 @@ void trap_illegal_handler(ExceptionStackFrame *frame){
 }
 
 void trap_memory_handler(ExceptionStackFrame *frame){
-    printf("[TRAP_MEMORY] Trapped Memory...%p, %p, %p, pid %d\n", frame->pc, frame->sp, frame->addr, running_block->pid);
+    //printf("[TRAP_MEMORY] Trapped Memory...%p, %p, %p, pid %d\n", frame->pc, frame->sp, frame->addr, running_block->pid);
     void *addr = frame->addr;
     int code = frame->code;
     int term_proc = 1;      // check if the process needs to be terminated 0: no, 1: yes
@@ -670,8 +690,7 @@ void trap_memory_handler(ExceptionStackFrame *frame){
                 for (itr = DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < DOWN_TO_PAGE((long)running_block->stack_allocated_addr) >> PAGESHIFT; itr++) {
                     free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
                 }
-                printf("    User stack break updated from %p to %p, %d pages are added\n", 
-                    running_block->stack_allocated_addr, addr, itr - (int)(DOWN_TO_PAGE((long)addr) >> PAGESHIFT));
+                //printf("    User stack break updated from %p to %p, %d pages are added\n", running_block->stack_allocated_addr, addr, itr - (int)(DOWN_TO_PAGE((long)addr) >> PAGESHIFT));
                 running_block->stack_allocated_addr = addr;
             }
             break;
@@ -740,7 +759,7 @@ void trap_math_handler(ExceptionStackFrame *frame){
 }
 
 void trap_tty_receive_handler(ExceptionStackFrame *frame){
-    printf("[TRAP_TTY_RECEIVE] Trapped Tty Receive, pid %d\n", running_block->pid);
+    //printf("[TRAP_TTY_RECEIVE] Trapped Tty Receive, pid %d\n", running_block->pid);
     int tty = frame->code;
     void *buf = malloc(sizeof(char) * TERMINAL_MAX_LINE);
     if (buf == NULL) {
@@ -763,16 +782,16 @@ void trap_tty_receive_handler(ExceptionStackFrame *frame){
     free(buf);
     newline->cur = 0;
     newline->len = len;
-    if (line_head == NULL) line_head = newline;
-    else line_tail->next = newline;
-    line_tail = newline;
+    if (line_head[tty] == NULL) line_head[tty] = newline;
+    else line_tail[tty]->next = newline;
+    line_tail[tty] = newline;
 
     if (tty_head[tty] != NULL)
         add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty));
 }
 
 void trap_tty_transmit_handler(ExceptionStackFrame *frame){
-    printf("[TRAP_TTY_TRANSMIT] Trapped Tty Transmit, pid %d\n", running_block->pid);
+    //printf("[TRAP_TTY_TRANSMIT] Trapped Tty Transmit, pid %d\n", running_block->pid);
     int tty = frame->code;
     if (tty_transmiting[tty] != NULL) {
         add_next_proc_on_queue(READY_Q, tty_transmiting[tty]);
@@ -785,14 +804,16 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
 /************************ Kernel calls *************************/
 
 extern int Fork() {
-    printf("    [FORK] pid %d\n", running_block->pid);
+    //printf("    [FORK] pid %d\n", running_block->pid);
     void *new_region0 = allocate_physical_pt();
     if (new_region0 == NULL) {
         fprintf(stderr, "Error allocate free physical page table\n");
         return ERROR;
     }
     pcb *new_pcb = init_pcb(new_region0, next_pid++, NORMAL_PROC);
-    if (running_block->pid == new_pcb->pid) return 0;
+    if (running_block->pid == new_pcb->pid) {
+        return 0;
+    }
     else {
         int i;
         for (i = MEM_INVALID_PAGES; i < running_block->brk_pn; i++) {
@@ -818,7 +839,7 @@ extern int Fork() {
 }
 
 extern int Exec(char *filename, char **argvec) {
-    printf("    [EXEC] pid %d\n", running_block->pid);
+    //printf("    [EXEC] pid %d\n", running_block->pid);
     int name_length = check_string(filename, PROT_READ);
     if (name_length < 0) {
         fprintf(stderr, "   [EXEC_ERROR]: filename cannot be accessed.\n");
@@ -883,22 +904,22 @@ extern int Exec(char *filename, char **argvec) {
 }
 
 extern void Exit(int status){
-    printf("    [EXIT] pid %d\n", running_block->pid);
+    //printf("    [EXIT] pid %d\n", running_block->pid);
     terminate_process(status);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
 }
 
 extern int Wait(int *status_ptr) {
-    printf("    [WAIT] pid %d\n", running_block->pid);
-    if (running_block->nchild == 0) {
-        fprintf(stderr, "   [WAIT_ERROR]: no more children of current process.\n");
-        return ERROR;
-    }
+    //printf("    [WAIT] pid %d\n", running_block->pid);
     if (check_buffer((void *)status_ptr, sizeof(int), PROT_WRITE) < 0) {
         fprintf(stderr, "   [WAIT_ERROR]: status pointer not accessible by kernel.\n");
         return ERROR;
     }
     if (running_block->exited_children_head == NULL) {
+        if (running_block->nchild == 0) {
+            fprintf(stderr, "   [WAIT_ERROR]: no more children of current process.\n");
+            return ERROR;
+        }
         running_block->state = 2;
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, get_next_proc_on_queue(READY_Q));
     }
@@ -941,7 +962,6 @@ extern int Delay(int clock_ticks) {
     printf("    [DELAY] pid %d\n", running_block->pid);
     if (clock_ticks < 0) return ERROR;
     if (clock_ticks == 0) return 0;
-    running_block->state = PCB_WAITBLOC;
     running_block->time_to_switch = sys_time + clock_ticks;
     add_next_proc_on_queue(DELAY_Q, running_block);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
@@ -949,27 +969,30 @@ extern int Delay(int clock_ticks) {
 }
 
 extern int TtyRead(int tty_id, void *buf, int len) {
-    printf("    [TTY_READ] pid %d\n", running_block->pid);
+    //printf("    [TTY_READ] pid %d\n", running_block->pid);
     if (len < 0) return ERROR;
     if (len == 0) return 0;
     if (check_buffer(buf, len, PROT_WRITE) < 0) {
         fprintf(stderr, "   [TTY_READ_ERROR]: buf not valid for kernel to write in.\n");
         return ERROR;
     }
-    if (line_head == NULL) {
+    if (line_head[tty_id] == NULL) {
         add_next_proc_on_queue(tty_id, running_block);
         ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
     }
-    if (len >= line_head->len - line_head->cur) {
-        int res = line_head->len - line_head->cur;
-        memcpy(buf, (void *)((long)line_head->buf + line_head->cur), res);
-        line_head = line_head->next;
-        if (line_head == NULL) line_tail = NULL;
+    line *tmp = line_head[tty_id];
+    if (len >= tmp->len - tmp->cur) {
+        int res = tmp->len - tmp->cur;
+        memcpy(buf, (void *)((long)tmp->buf + tmp->cur), res);
+        line_head[tty_id] = tmp->next;
+        if (line_head[tty_id] == NULL) line_tail[tty_id] = NULL;
+        free(tmp->buf);
+        free(tmp);
         return res;
     }
     else {
-        memcpy(buf, (void *)((long)line_head->buf + line_head->cur), len);
-        line_head->cur = line_head->cur + len;
+        memcpy(buf, (void *)((long)tmp->buf + tmp->cur), len);
+        tmp->cur = tmp->cur + len;
         if (tty_head[tty_id] != NULL)
             add_next_proc_on_queue(READY_Q, get_next_proc_on_queue(tty_id));
         return len;
@@ -977,7 +1000,7 @@ extern int TtyRead(int tty_id, void *buf, int len) {
 }
 
 extern int TtyWrite(int tty_id, void *buf, int len) {
-    printf("    [TTY_WRITE] pid %d\n", running_block->pid);
+    //printf("    [TTY_WRITE] pid %d\n", running_block->pid);
     if (len < 0 || len > TERMINAL_MAX_LINE) return ERROR;
     if (len == 0) return 0;
     if (check_buffer(buf, len, PROT_READ) < 0) {

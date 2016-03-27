@@ -55,9 +55,7 @@ main(int argc, char **argv)
 	j = 1;
 	while ((cmd_argv[j++] = strtok(NULL, separators)) != NULL)
 	    ;
-
 	pid = Fork();
-
 	if (pid < 0) {
 	    TtyPrintf(termno, "Cannot Fork process\n");
 	    continue;
