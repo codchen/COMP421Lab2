@@ -657,12 +657,12 @@ void trap_memory_handler(ExceptionStackFrame *frame){
         case TRAP_MEMORY_MAPERR:   /* No mapping at %p */
             if ((long) addr >= VMEM_1_BASE) {   // referenced address is in region 1
                 reason = "user process attempted to reference kernel address at ";
-            } else if (((long)addr >> PAGESHIFT) < running_block->brk_pn){
-                reason = "user process attempted to reference an address in user heap at ";
+            } else if (((long)addr >> PAGESHIFT) < MEM_INVALID_PAGES){
+                reason = "user process attempted to reference an address in invalid pages at ";
             } else if (addr >= running_block->stack_allocated_addr) {
                 fprintf(stderr, "stack allocated: %p\n", running_block->stack_allocated_addr);
                 reason = "user process attempted to reference unmapped page above user stack at ";
-            } else if ((DOWN_TO_PAGE((long)addr) >> PAGESHIFT) == running_block->brk_pn) {
+            } else if ((DOWN_TO_PAGE((long)addr) >> PAGESHIFT) <= running_block->brk_pn) {
                 reason = "user process attempted to reference a red zone address between user stack and user heap at  ";
             } else {
                 term_proc = 0;
@@ -702,13 +702,13 @@ void trap_math_handler(ExceptionStackFrame *frame){
     char error_msg[255];
     switch(code) {
     case TRAP_MATH_INTDIV:     
-        reason = "nteger divide by zero";
+        reason = "integer divided by zero";
         break;
     case TRAP_MATH_INTOVF:
-        reason =  "Integer overflows";
+        reason =  "integer overflows";
         break;
     case TRAP_MATH_FLTDIV:
-        reason = "floating divide by zero";
+        reason = "floating divided by zero";
         break;
     case TRAP_MATH_FLTOVF:
         reason = "floating overflows";
@@ -785,7 +785,7 @@ void trap_tty_transmit_handler(ExceptionStackFrame *frame){
 /************************ Kernel calls *************************/
 
 extern int Fork() {
-    printf("[FORK] pid %d\n", running_block->pid);
+    printf("    [FORK] pid %d\n", running_block->pid);
     void *new_region0 = allocate_physical_pt();
     if (new_region0 == NULL) {
         fprintf(stderr, "Error allocate free physical page table\n");
@@ -818,7 +818,7 @@ extern int Fork() {
 }
 
 extern int Exec(char *filename, char **argvec) {
-    printf("[EXEC] pid %d\n", running_block->pid);
+    printf("    [EXEC] pid %d\n", running_block->pid);
     int name_length = check_string(filename, PROT_READ);
     if (name_length < 0) {
         fprintf(stderr, "   [EXEC_ERROR]: filename cannot be accessed.\n");
@@ -883,13 +883,13 @@ extern int Exec(char *filename, char **argvec) {
 }
 
 extern void Exit(int status){
-    printf("[EXIT] pid %d\n", running_block->pid);
+    printf("    [EXIT] pid %d\n", running_block->pid);
     terminate_process(status);
     ContextSwitch(MySwitchFunc, running_block->ctx, (void *)running_block, (void *)get_next_proc_on_queue(READY_Q));
 }
 
 extern int Wait(int *status_ptr) {
-    printf("[WAIT] pid %d\n", running_block->pid);
+    printf("    [WAIT] pid %d\n", running_block->pid);
     if (running_block->nchild == 0) {
         fprintf(stderr, "   [WAIT_ERROR]: no more children of current process.\n");
         return ERROR;
@@ -916,8 +916,9 @@ extern int GetPid() {
 }
 
 extern int Brk(void *addr) {
-    printf("[BRK] pid %d\n", running_block->pid);
+    printf("    [BRK] pid %d\n", running_block->pid);
     int new_brk = UP_TO_PAGE(addr) >> PAGESHIFT;
+    printf("    Attempting to set old brk %d to new brk %d\n", running_block->brk_pn, new_brk);
     if (new_brk < running_block->brk_pn && new_brk >= MEM_INVALID_PAGES) {  // move brk down
         int itr;
         for (itr = new_brk; itr < running_block->brk_pn; itr++) {
@@ -937,7 +938,7 @@ extern int Brk(void *addr) {
 }
 
 extern int Delay(int clock_ticks) {
-    printf("[DELAY] pid %d\n", running_block->pid);
+    printf("    [DELAY] pid %d\n", running_block->pid);
     if (clock_ticks < 0) return ERROR;
     if (clock_ticks == 0) return 0;
     running_block->state = PCB_WAITBLOC;
@@ -948,7 +949,7 @@ extern int Delay(int clock_ticks) {
 }
 
 extern int TtyRead(int tty_id, void *buf, int len) {
-    printf("[TTY_READ] pid %d\n", running_block->pid);
+    printf("    [TTY_READ] pid %d\n", running_block->pid);
     if (len < 0) return ERROR;
     if (len == 0) return 0;
     if (check_buffer(buf, len, PROT_WRITE) < 0) {
@@ -976,7 +977,7 @@ extern int TtyRead(int tty_id, void *buf, int len) {
 }
 
 extern int TtyWrite(int tty_id, void *buf, int len) {
-    printf("[TTY_WRITE] pid %d\n", running_block->pid);
+    printf("    [TTY_WRITE] pid %d\n", running_block->pid);
     if (len < 0 || len > TERMINAL_MAX_LINE) return ERROR;
     if (len == 0) return 0;
     if (check_buffer(buf, len, PROT_READ) < 0) {
