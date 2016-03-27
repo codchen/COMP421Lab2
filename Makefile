@@ -33,8 +33,8 @@ ALL = yalnix init idle console shell forkwait2
 #	make up your kernel, and KERNEL_SRCS should  be a list of
 #	the corresponding source files that make up your kernel.
 #
-KERNEL_OBJS = yalnix_jjf.o
-KERNEL_SRCS = yalnix_jjf.c
+KERNEL_OBJS = yalnix.o
+KERNEL_SRCS = yalnix.c
 #
 #	You should not have to modify anything else in this Makefile
 #	below here.  If you want to, however, you may modify things
