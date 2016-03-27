@@ -88,6 +88,8 @@ int read_from_pfn(void *physical_addr);
 void write_to_pfn(void *physical_addr, int towrite);
 void validate_region_0_pt();   // set valid bit of region_0_pt pte to 1
 
+void free_page_enq_new(int isregion1, int vpn);
+
 /* Trap Handlers*/
 void trap_kernel_handler(ExceptionStackFrame *frame);
 void trap_clock_handler(ExceptionStackFrame *frame);
@@ -668,8 +670,9 @@ void trap_memory_handler(ExceptionStackFrame *frame){
                 for (itr = DOWN_TO_PAGE((long)addr) >> PAGESHIFT; itr < DOWN_TO_PAGE((long)running_block->stack_allocated_addr) >> PAGESHIFT; itr++) {
                     free_page_deq(REGION_0, itr, READ_WRITE_PERM, READ_WRITE_PERM);
                 }
+                printf("    User stack break updated from %p to %p, %d pages are added\n", 
+                    running_block->stack_allocated_addr, addr, itr - (int)(DOWN_TO_PAGE((long)addr) >> PAGESHIFT));
                 running_block->stack_allocated_addr = addr;
-                printf("stack break updated at %p\n", addr);
             }
             break;
         case TRAP_MEMORY_ACCERR:   /* Protection violation at %p */
@@ -1032,11 +1035,13 @@ int check_arg(char **arg) {
 /* Given a virtual page number, add its corresponding physical page to free page list */
 void free_page_enq(int isregion1, int vpn) {
     struct pte *region = isregion1?region_1_pt:region_0_pt;
-    region[vpn].kprot |= PROT_WRITE;
-    WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)((vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE));
+    if ((region[vpn].kprot & PROT_WRITE) == 0) {
+        region[vpn].kprot |= PROT_WRITE;
+        WriteRegister(REG_TLB_FLUSH, (RCS421RegVal)(long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE);
+    }
     *(int *)((long)(vpn << PAGESHIFT) + isregion1 * VMEM_REGION_SIZE) = free_page_head;
     free_page_head = region[vpn].pfn;
-    clear_pte(isregion1, vpn);
+    region[vpn].valid = 0;
     num_free_pages++;
 }
 
