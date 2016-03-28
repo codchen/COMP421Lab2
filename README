@@ -1,0 +1,75 @@
+COMP421
+Lab2 - Yalnix Kernel
+Xiaoyu Chen (xc12) and Jiafang Jiang (jj26)
+
+* All implementations of the yalnix kernel locate in yalnix.c, except for 
+  the idle program which locates in idle.c.
+* All kernel behaviors are according to the project requirements. Low-level
+  detailed descriptions can be found in code comments. Here we describe some
+  high-level design decision that we took.
+
+Data Structure
+-----------------------------------------------------------------------------
+Struct cei (Child Exit Info):
+	Each struct contains pid and exit status of one exited child process, and
+	the pointer to the next cei (NULL if none), which enables each parent 
+	process to record all cei's in a FIFO linked list. Note that only when a
+	child process exits will it add its corresponding cei to its parent's 
+	linked list.
+
+Struct pcb (Process Control Block):
+	Each process has one until it exits. It contains all necessary bookkeeping
+	variables, whose names themselves are self-explanatory enough. Still, two
+	of them needs some more explanation. 'time_to_switch' is meaningful for 
+	two kinds of processes. For the currently running process, it represents 
+	the time that the process needs to be context switched if it has not 
+	already done so through kernel calls during two clock clicks. In other
+	words, when a process is context switched to, its time_to_switch will be 
+	set to current system 'time' plus 2. The other kind of process is delayed
+	process. When a process calls Delay, Its 'time_to_switch' will be set to 
+	current system 'time' plus the amount of clock clicks it wants to delay.
+	The other variable 'next' also has different meanings in different
+	circumstances. When a process is in ready queue, its 'next' points to the
+	the next ready process in ready queue (NULL if none). Similarly, when a 
+	process is in other queues, its 'next' points to the next process in that
+	specific queue.
+
+Struct line:
+	Struct line represents an input line of user from a specific terminal that
+	has not been read by any programs. So each terminal has its own queue of 
+	lines. 'buf' contains the actual line of inputs. 'cur' is the current 
+	cursor on the line. 'len' is the length of the line. 'next' makes the 
+	queue as a linked list.
+
+The yalnix kernel has a pointer to the current running process's pcb, a queue
+of pcb's of ready processes, a queue of pcb's of delayed processes which is
+sorted ascendingly based on their 'time_to_switch's, a queue of pcb's of 
+processes blocked for TtyRead and a queue of pcb's of processes blocked for
+TtyWrite for each terminal (the first NUM_TERMINALS pointers of tty_head and
+tty_tail points are for TtyRead; which the second NUM_TERMINALS are for 
+TtyWrite), a pointer to the currently transmitting process's pcb for each
+terminal, and a pointer to the idle process.
+-----------------------------------------------------------------------------
+
+Free Memory Management
+-----------------------------------------------------------------------------
+We used a linked list structure that directly writes the next free physical
+page number, as an int, on the first 4 bytes of the current free physical
+page.
+
+For allocating page table for new process, since one page table occupies
+memory of exactly half page, we enforce every page table to be semi-page-
+aligned;that is, the page table either starts at the page base (lower table)
+or ends at the page limit (upper table). Two linked lists, for lower and 
+upper page table respectively, are kept in the same fashion as for recording 
+free physical pages.
+-----------------------------------------------------------------------------
+
+Testing
+-----------------------------------------------------------------------------
+Besides all testing scripts that is provided in /clear/courses/comp421/pub/
+samples-lab2, we also tested for orphaned child process behavior, more 
+complex terminal instructions, and tests that targets our data structure 
+design (such as exiting the second eldest child of a process and checking
+whether linked list structures are properly updated, etc.).
+-----------------------------------------------------------------------------
